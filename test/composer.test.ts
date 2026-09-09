@@ -203,6 +203,21 @@ describe("grapheme-safe NORMAL mode", () => {
     expect(state.cursor).toBe(0);
   });
 
+  test("e moves to word ends and advances from an end or non-word", () => {
+    let state = createInitialState({ buffer: "one two" });
+    state = step(state, "e");
+    expect(state.cursor).toBe(2);
+    state = step(state, "e");
+    expect(state.cursor).toBe(6);
+
+    state = createInitialState({ buffer: "one two" });
+    state = step(state, "l");
+    state = step(state, "l");
+    state = step(state, "l");
+    state = step(state, "e");
+    expect(state.cursor).toBe(6);
+  });
+
   test("i/a/I/A enter at the Vim-style positions", () => {
     let state = createInitialState({ buffer: "abc" });
     state = step(state, "l");

@@ -16,6 +16,11 @@ import {
   type OpenTuiKeyLike,
   type Writable,
 } from "./app";
+import {
+  type ClipboardCopy,
+  copyToNativeClipboard,
+  type NativeClipboardResult,
+} from "./clipboard";
 import { type ComposerState, createInitialState } from "./composer";
 import { type ConversionResult, convert } from "./converter";
 import {
@@ -41,6 +46,7 @@ export interface TuiSessionOptions {
   readonly completion: Completion;
   readonly terminal: Writable;
   readonly convert?: (value: string) => ConversionResult;
+  readonly copyToClipboard?: ClipboardCopy;
   readonly render: (view: ComposerView) => void;
   readonly width?: number;
   readonly height?: number;
@@ -60,11 +66,13 @@ export class TuiSession {
   private status: string | null = null;
   private statusTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly convertValue: (value: string) => ConversionResult;
+  private readonly copyToClipboard: ClipboardCopy;
 
   constructor(private readonly options: TuiSessionOptions) {
     this.width = options.width ?? 80;
     this.height = options.height ?? 24;
     this.convertValue = options.convert ?? convert;
+    this.copyToClipboard = options.copyToClipboard ?? copyToNativeClipboard;
     options.completion.addCleanup(() => {
       if (this.statusTimer !== undefined) clearTimeout(this.statusTimer);
     });
@@ -155,8 +163,20 @@ export class TuiSession {
   private handleEffects(effects: readonly AdapterEffect[]): void {
     for (const effect of effects) {
       if (effect.type === "yank") {
-        this.options.terminal.write(effect.sequence);
-        this.showStatus("Clipboard sequence sent");
+        let copied: NativeClipboardResult | null = null;
+        try {
+          copied = this.copyToClipboard(effect.value);
+        } catch {
+          // Clipboard integrations are best-effort; preserve the OSC 52 path.
+        }
+        if (copied) {
+          this.showStatus(`Copied via ${copied.backend}`);
+        } else {
+          this.options.terminal.write(effect.sequence);
+          this.showStatus(
+            "OSC 52 fallback sent (clipboard change unconfirmed)",
+          );
+        }
       } else if (effect.type === "submit") {
         this.options.completion.finish(effect);
       } else if (effect.type === "quit") {
@@ -215,6 +235,7 @@ export interface LaunchTuiOptions {
   readonly stdout?: Writable;
   readonly stderr?: Writable;
   readonly convert?: (value: string) => ConversionResult;
+  readonly copyToClipboard?: ClipboardCopy;
 }
 
 /** Launch the full-screen composer and resolve only after its single cleanup path. */
@@ -256,6 +277,7 @@ export async function launchTui(
       completion,
       terminal,
       convert: options.convert,
+      copyToClipboard: options.copyToClipboard,
       width: renderer.width,
       height: renderer.height,
       render: (view) => paint(renderer, view),

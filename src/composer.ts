@@ -239,6 +239,30 @@ function nextWord(parts: readonly string[], cursor: number): number {
   return index;
 }
 
+function wordEnd(parts: readonly string[], start: number): number {
+  let index = start;
+  while (index + 1 < parts.length && isWordGrapheme(parts[index + 1])) {
+    index += 1;
+  }
+  return index;
+}
+
+function nextWordEnd(parts: readonly string[], cursor: number): number {
+  if (parts.length === 0) return 0;
+
+  const current = Math.max(0, Math.min(cursor, parts.length - 1));
+  if (!isWordGrapheme(parts[current])) {
+    const start = nextWord(parts, current);
+    return start < parts.length ? wordEnd(parts, start) : current;
+  }
+
+  const currentEnd = wordEnd(parts, current);
+  if (currentEnd > current) return currentEnd;
+
+  const start = nextWord(parts, current);
+  return start < parts.length ? wordEnd(parts, start) : current;
+}
+
 function normaliseState(state: ComposerState): ComposerState {
   const count = graphemeLength(state.buffer);
   const cursor =
@@ -422,6 +446,14 @@ function normalKey(state: ComposerState, key: string): ComposerResult {
         state: withCursor(
           state,
           wordStartBefore(graphemes(state.buffer), state.cursor),
+        ),
+        effects: [],
+      };
+    case "e":
+      return {
+        state: withCursor(
+          state,
+          nextWordEnd(graphemes(state.buffer), state.cursor),
         ),
         effects: [],
       };

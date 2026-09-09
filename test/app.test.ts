@@ -37,6 +37,12 @@ describe("OpenTUI adapter", () => {
       shift: false,
       alt: false,
     });
+    expect(
+      mapOpenTuiKey({ name: "w", sequence: "\x17", ctrl: true }),
+    ).toMatchObject({ key: "w", ctrl: true });
+    expect(
+      mapOpenTuiKey({ name: "u", sequence: "\x15", ctrl: true }),
+    ).toMatchObject({ key: "u", ctrl: true });
     expect(mapOpenTuiKey({ name: "unknown", sequence: "界" }).key).toBe("界");
     expect(mapOpenTuiKey({ name: "", sequence: "\x03" })).toMatchObject({
       key: "c",
@@ -155,7 +161,37 @@ describe("completion and session effects", () => {
     expect(await interrupt.promise).toBe(130);
   });
 
-  test("y writes only OSC to terminal and exposes transient status", () => {
+  test("y prefers an injected native clipboard and reports its backend", () => {
+    const terminal: string[] = [];
+    const copied: string[] = [];
+    const completion = new Completion(memoryStream(), memoryStream());
+    let rendered = "";
+    const session = new TuiSession({
+      completion,
+      terminal: memoryStream(terminal),
+      convert: converted,
+      copyToClipboard: (value) => {
+        copied.push(value);
+        return { backend: "xclip" };
+      },
+      statusDurationMs: 60_000,
+      render: (view) => {
+        rendered = view.lines
+          .flatMap((line) => line.spans.map((span) => span.text))
+          .join("");
+      },
+    });
+    session.key({ name: "i", sequence: "i" });
+    session.paste("nihon");
+    session.key({ name: "escape", sequence: "\x1b" });
+    session.key({ name: "y", sequence: "y" });
+    expect(copied).toEqual(["ひ:nihon"]);
+    expect(terminal).toEqual([]);
+    expect(rendered).toContain("Copied via xclip");
+    completion.finish({ type: "quit" });
+  });
+
+  test("y emits OSC 52 with an unconfirmed status when native copy fails", () => {
     const terminal: string[] = [];
     const completion = new Completion(memoryStream(), memoryStream());
     let rendered = "";
@@ -163,6 +199,7 @@ describe("completion and session effects", () => {
       completion,
       terminal: memoryStream(terminal),
       convert: converted,
+      copyToClipboard: () => null,
       statusDurationMs: 60_000,
       render: (view) => {
         rendered = view.lines
@@ -175,9 +212,10 @@ describe("completion and session effects", () => {
     session.key({ name: "escape", sequence: "\x1b" });
     session.key({ name: "y", sequence: "y" });
     expect(terminal).toEqual([osc52Sequence("ひ:nihon")]);
-    expect(rendered).toContain("Clipboard sequence sent");
-    expect(rendered).not.toContain("copied");
-    expect(rendered).not.toContain("accepted");
+    expect(rendered).toContain(
+      "OSC 52 fallback sent (clipboard change unconfirmed)",
+    );
+    expect(rendered).not.toContain("Copied via");
     completion.finish({ type: "quit" });
   });
 

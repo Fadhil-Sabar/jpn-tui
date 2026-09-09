@@ -6,6 +6,7 @@ from __future__ import annotations
 import errno
 import os
 import re
+import shutil
 import signal
 import sys
 import time
@@ -22,6 +23,7 @@ except (ImportError, AttributeError) as error:
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP = os.path.join(ROOT, "src", "index.ts")
+BUN = shutil.which("bun")
 ALT_ENTER = b"\x1b[?1049h"
 ALT_EXIT = b"\x1b[?1049l"
 OSC52_NIHONGO = b"\x1b]52;c;5pel5pys6Kqe\x07"
@@ -42,8 +44,18 @@ def run_case(name: str, actions: list[tuple[float, str, object]]) -> tuple[bytes
     if pid == 0:
         os.chdir(ROOT)
         environment = os.environ.copy()
-        environment.update({"TERM": "xterm-256color", "COLORTERM": "truecolor"})
-        os.execve(APP, [APP], environment)
+        environment.update(
+            {"TERM": "xterm-256color", "COLORTERM": "truecolor", "PATH": ""}
+        )
+        for variable in (
+            "DISPLAY",
+            "WAYLAND_DISPLAY",
+            "WSL_DISTRO_NAME",
+            "WSL_INTEROP",
+        ):
+            environment.pop(variable, None)
+        assert BUN is not None
+        os.execve(BUN, [BUN, APP], environment)
 
     output = bytearray()
     status: int | None = None
@@ -118,12 +130,21 @@ def after_final_exit(output: bytes) -> bytes:
     return suffix
 
 
+def assert_submitted(output: bytes, value: bytes) -> None:
+    suffix = after_final_exit(output)
+    assert suffix in (value + b"\n", value + b"\r\n"), (
+        f"submitted value was {suffix!r}, expected {value!r}"
+    )
+
+
 def main() -> None:
     if os.name != "posix" or not hasattr(pty, "fork"):
         print("SKIP PTY smoke: requires POSIX pty.fork")
         return
     if not os.path.isfile(APP) or not os.access(APP, os.X_OK):
         raise AssertionError(f"source checkout executable is missing or not executable: {APP}")
+    if BUN is None:
+        raise AssertionError("bun executable is missing from PATH")
 
     # Delays are intentional: exercise real key decoding/rendering rather than
     # relying on a single coalesced write that can race terminal startup.
@@ -146,9 +167,60 @@ def main() -> None:
     assert visible_cursor_positions[-1][0] == b"4", (
         "final input cursor must be positioned on terminal row 4, not row 3"
     )
-    assert after_final_exit(enter) in ("日本語\n".encode(), "日本語\r\n".encode()), (
-        "only the submitted value may follow final alternate-screen exit"
+    assert_submitted(enter, "日本語".encode())
+
+    normal_e, normal_e_code = run_case(
+        "normal-e",
+        [
+            (0.8, "write", b"i"),
+            (1.0, "write", b"111 222"),
+            (1.3, "write", b"\x1b"),
+            (1.5, "write", b"0e"),
+            (1.8, "write", b"x"),
+            (2.0, "write", b"\r"),
+        ],
     )
+    assert normal_e_code == 0, f"normal e exited {normal_e_code}"
+    assert_submitted(normal_e, b"11 222")
+
+    normal_b, normal_b_code = run_case(
+        "normal-b",
+        [
+            (0.8, "write", b"i"),
+            (1.0, "write", b"111 222"),
+            (1.3, "write", b"\x1b"),
+            (1.5, "write", b"0wb"),
+            (1.8, "write", b"x"),
+            (2.0, "write", b"\r"),
+        ],
+    )
+    assert normal_b_code == 0, f"normal b exited {normal_b_code}"
+    assert_submitted(normal_b, b"11 222")
+
+    ctrl_w, ctrl_w_code = run_case(
+        "ctrl-w",
+        [
+            (0.8, "write", b"i"),
+            (1.0, "write", b"111 222"),
+            (1.3, "write", b"\x17"),
+            (1.6, "write", b"\r"),
+        ],
+    )
+    assert ctrl_w_code == 0, f"Ctrl-W exited {ctrl_w_code}"
+    assert_submitted(ctrl_w, b"111 ")
+
+    ctrl_u, ctrl_u_code = run_case(
+        "ctrl-u",
+        [
+            (0.8, "write", b"i"),
+            (1.0, "write", b"111 222"),
+            (1.3, "write", b"\x15"),
+            (1.6, "write", b"333"),
+            (1.9, "write", b"\r"),
+        ],
+    )
+    assert ctrl_u_code == 0, f"Ctrl-U exited {ctrl_u_code}"
+    assert_submitted(ctrl_u, b"333")
 
     quit_output, quit_code = run_case("quit", [(0.8, "write", b"q")])
     assert quit_code == 0, f"q exited {quit_code}"
@@ -175,7 +247,7 @@ def main() -> None:
     )
     assert yank_code == 0, f"yank case exited {yank_code}"
     assert OSC52_NIHONGO in yank, "capture omitted exact OSC 52 bytes"
-    assert b"Clipboard sequence sent" in yank
+    assert b"OSC 52 fallback sent (clipboard change unconfirmed)" in yank
 
     resized, resize_code = run_case(
         "resize",
@@ -190,7 +262,9 @@ def main() -> None:
     small_at = resized.index(b"Terminal too small (59x14)")
     assert b"Japanese composer" in resized[small_at:], "normal view did not return after resize"
 
-    print("PTY smoke passed: Enter, q, Ctrl-C, OSC52, and resize")
+    print(
+        "PTY smoke passed: Enter, normal e/b, Ctrl-W/U, q, Ctrl-C, OSC52, and resize"
+    )
 
 
 if __name__ == "__main__":

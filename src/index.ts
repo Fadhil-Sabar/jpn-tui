@@ -3,6 +3,7 @@
 import { launchTui } from "./tui";
 
 export * from "./app";
+export * from "./clipboard";
 export * from "./composer";
 export * from "./converter";
 export * from "./dictionary";

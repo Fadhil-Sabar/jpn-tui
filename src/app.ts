@@ -62,6 +62,10 @@ export function mapOpenTuiKey(event: OpenTuiKeyLike): AdapterAction {
     key = event.shift ? "Shift-Tab" : "Tab";
   } else if (lowerName === "space") {
     key = " ";
+  } else if (ctrl && /^[a-z]$/i.test(event.name)) {
+    // OpenTUI keeps the printable key name alongside the control sequence.
+    // The reducer needs the former so it can recognise Ctrl-W/U, etc.
+    key = event.name;
   } else {
     key = namedKeys[lowerName] ?? event.sequence ?? event.name;
   }

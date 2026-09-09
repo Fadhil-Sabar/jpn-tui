@@ -33,7 +33,7 @@ jpn
 | --- | --- |
 | `h`, `l` | Move left or right |
 | `0`, `$` | Move to the start or end |
-| `w`, `b` | Move by word |
+| `w`, `b`, `e` | Move by word (`e` moves to the end) |
 | `i`, `a` | Insert before or after the cursor |
 | `I`, `A` | Insert at the start or end |
 | `x` | Delete the grapheme under the cursor |
@@ -43,7 +43,7 @@ jpn
 | `j`, `k` | Select the next or previous preview |
 | `Tab`, `Shift-Tab` | Cycle previews forward or backward |
 | `1`, `2`, `3` | Select hiragana, katakana, or kanji |
-| `y` | Send the selected preview to the clipboard with OSC 52 |
+| `y` | Copy the selected preview (native clipboard first, OSC 52 fallback) |
 | `q` | Quit without output |
 
 ### Insert mode
@@ -73,7 +73,9 @@ Examples:
 | `watashi wa gakusei desu` | `わたしわがくせいです` | `ワタシワガクセイデス` | `私は学生です` |
 | `arigatou gozaimasu` | `ありがとうございます` | `アリガトウゴザイマス` | `ありがとうございます` |
 
-`Enter` restores the terminal and writes only the selected value plus a newline to standard output, so it can be captured or redirected. `y` sends that value as an OSC 52 sequence without exiting. OSC 52 works only when the terminal (and any multiplexer or remote session) supports and permits clipboard writes; `jpn` cannot confirm that the clipboard changed.
+`Enter` restores the terminal and writes only the selected value plus a newline to standard output, so it can be captured or redirected. `y` copies without exiting. It first tries the platform clipboard command: `wl-copy` on Linux Wayland, `xclip` then `xsel` on Linux X11 (including XFCE), `pbcopy` on macOS, or `clip.exe` on Windows and WSL. These commands are optional and no shell is involved.
+
+If no applicable native command succeeds, `jpn` sends the existing OSC 52 sequence for SSH, minimal systems, and compatible terminals. The status line identifies a successful native backend; the OSC 52 fallback is explicitly unconfirmed because terminal and multiplexer policy can reject it.
 
 Kanji conversion is dictionary-ranked segmentation, not Mozc or a contextual IME. Readings with multiple valid spellings can therefore produce an unintended result; select a kana row when exactness matters.
 
