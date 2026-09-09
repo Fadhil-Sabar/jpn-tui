@@ -1,0 +1,34 @@
+{
+  "name": "jpn-tui",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT",
+  "files": [
+    "README.md",
+    "LICENSE",
+    "data",
+    "scripts",
+    "src"
+  ],
+  "bin": {
+    "jpn": "src/index.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "test:pty": "python3 test/pty_smoke.py",
+    "data:build": "bun scripts/build-dictionary.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "build": "rm -rf dist && bun build src/index.ts --target bun --external @opentui/core --outfile dist/jpn.js && chmod +x dist/jpn.js",
+    "smoke": "bun -e 'import(\"./dist/jpn.js\").then(m => { if (typeof m.launchTui !== \"function\") throw new Error(\"missing launchTui export\") })'"
+  },
+  "dependencies": {
+    "@opentui/core": "0.5.11",
+    "wanakana": "5.3.1"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.2.0",
+    "@types/bun": "latest",
+    "typescript": "^5.9.2"
+  }
+}
