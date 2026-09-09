@@ -197,11 +197,12 @@ function prepareReading(
   value: string,
   markGrammaticalParticles: boolean,
   dictionary?: DictionaryReader,
+  markKatakanaFallbacks = markGrammaticalParticles,
 ): PreparedReading {
   const tokens = tokenise(value);
   const katakanaFallbackConversions = new Map<InputToken, string>();
 
-  if (markGrammaticalParticles && dictionary !== undefined) {
+  if (markKatakanaFallbacks && dictionary !== undefined) {
     for (let index = 0; index < tokens.length; index += 1) {
       const token = tokens[index];
       if (
@@ -321,6 +322,28 @@ function toKatakanaPreservingPunctuation(value: string): string {
     output += toKatakana(chars.slice(start, index).join(""));
   }
   return output;
+}
+
+/**
+ * Build the Katakana-only reading used by Jinen.
+ *
+ * The visible Katakana candidate intentionally preserves ordinary or
+ * incomplete ASCII text. Jinen, however, expects a Katakana reading. Reuse
+ * the dictionary-aware preparation used by the Kanji candidate so a
+ * contextual foreign-name fallback (for example terminal `l` in `fadhil`)
+ * is transliterated, without treating arbitrary ASCII as eligible input.
+ */
+export function toJinenReading(
+  value: string,
+  options?: ConverterOptions | DictionaryReader,
+): string {
+  if (value.length === 0) return "";
+  const dictionary = dictionaryFromOptions(options);
+  return toKatakanaPreservingPunctuation(
+    // Keep the written particle form (`wa` → `ハ`) expected by Jinen while
+    // reusing the contextual unknown-name fallback from Kanji preparation.
+    prepareReading(value, true, dictionary, true).reading,
+  );
 }
 
 function isKana(value: string): boolean {

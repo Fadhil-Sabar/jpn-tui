@@ -3,6 +3,7 @@ import {
   type ConversionResult,
   convert,
   segmentReading,
+  toJinenReading,
 } from "../src/converter";
 import type { DictionaryEntry, DictionaryReader } from "../src/dictionary";
 
@@ -64,6 +65,14 @@ describe("romaji conversion", () => {
       kanji: "私はファヂルです",
     });
     expect(convert("fadhil").kanji).toBe("fadhil");
+  });
+
+  test("builds Jinen's Katakana reading for contextual foreign names", () => {
+    expect(toJinenReading("watashi no namae wa fadhil desu")).toBe(
+      "ワタシノナマエハファディルデス",
+    );
+    expect(toJinenReading("fadhil")).toBe("fadhil");
+    expect(toJinenReading("hello")).toBe("hello");
   });
 
   test("handles romaji edge cases deterministically", () => {

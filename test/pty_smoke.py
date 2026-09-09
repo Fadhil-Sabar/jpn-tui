@@ -9,6 +9,7 @@ import re
 import shutil
 import signal
 import sys
+import tempfile
 import time
 
 try:
@@ -40,12 +41,20 @@ def write_key(fd: int, value: bytes) -> None:
 
 def run_case(name: str, actions: list[tuple[float, str, object]]) -> tuple[bytes, int]:
     """Run one isolated app, staging actions by elapsed time and always reaping it."""
+    isolated_home = tempfile.mkdtemp(prefix="jpn-tui-pty-")
     pid, fd = pty.fork()
     if pid == 0:
         os.chdir(ROOT)
         environment = os.environ.copy()
         environment.update(
-            {"TERM": "xterm-256color", "COLORTERM": "truecolor", "PATH": ""}
+            {
+                "TERM": "xterm-256color",
+                "COLORTERM": "truecolor",
+                "PATH": "",
+                "HOME": isolated_home,
+                "XDG_CONFIG_HOME": os.path.join(isolated_home, "config"),
+                "XDG_DATA_HOME": os.path.join(isolated_home, "data"),
+            }
         )
         for variable in (
             "DISPLAY",
@@ -117,6 +126,7 @@ def run_case(name: str, actions: list[tuple[float, str, object]]) -> tuple[bytes
             except ChildProcessError:
                 pass
         os.close(fd)
+        shutil.rmtree(isolated_home, ignore_errors=True)
 
 
 def after_final_exit(output: bytes) -> bytes:

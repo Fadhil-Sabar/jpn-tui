@@ -44,6 +44,7 @@ jpn
 | `Tab`, `Shift-Tab` | Cycle previews forward or backward |
 | `1`, `2`, `3` | Select hiragana, katakana, or kanji |
 | `y` | Copy the selected preview (native clipboard first, OSC 52 fallback) |
+| `s` | Open Settings |
 | `q` | Quit without output |
 
 ### Insert mode
@@ -56,6 +57,8 @@ jpn
 | `Left`, `Right`, `Home`, `End` | Move the caret |
 | `Ctrl-W` | Delete the previous word |
 | `Ctrl-U` | Delete to the start |
+
+Settings uses `j`/`k`, arrows, `Tab`, or `1`/`2`/`3` to move between rows. Select **AI Prediction** and then choose a Prediction Engine. The active engine is shown with `●`; the focused row is independent of the active engine.
 
 ## Previews and output
 
@@ -79,9 +82,20 @@ If no applicable native command succeeds, `jpn` sends the existing OSC 52 sequen
 
 Kanji conversion is dictionary-ranked segmentation, not Mozc or a contextual IME. Readings with multiple valid spellings can therefore produce an unintended result; select a kana row when exactness matters.
 
+## Optional local Jinen prediction
+
+Jinen is an optional local prediction backend for the Kanji row. The available GGUF models are:
+
+- **Jinen xsmall** (~28 MB, **Recommended**), Q5_K_M
+- **Jinen small** (~81 MB, higher-quality), Q5_K_M
+
+Models are not bundled. Jinen runs through node-llama-cpp/llama.cpp, CPU-only, deterministically and locally. The bundled dictionary is the default and deterministic fallback: it works offline, and a Jinen load, inference, or invalid-output failure leaves the exact dictionary result in place.
+
+Jinen models are used only after they have been explicitly enabled in Settings. If a selected model is not installed, Settings shows its size and asks for confirmation. Choose **Download** to begin; choosing **Cancel** or leaving the prompt does not download anything. Network access for a model occurs only after that explicit confirmation. After download, the model is stored under `$XDG_DATA_HOME/jpn-tui/models`; when `XDG_DATA_HOME` is unset, the default is `~/.local/share/jpn-tui/models`.
+
 ## Offline use and dictionary rebuild
 
-Normal operation is offline: `data/jmdict.sqlite` is bundled and no runtime network request is made. Dependency installation may require network access. A dictionary rebuild first uses the verified `.cache/jmdict/jmdict.tgz` archive when available and otherwise downloads the pinned release; it always verifies the source SHA-256. The rebuild also requires `tar`:
+Dictionary-only operation is offline: `data/jmdict.sqlite` is bundled and no runtime network request is made. Optional Jinen inference is local after its model is installed; the only Jinen network access is the explicitly confirmed model download. Dependency installation may require network access. A dictionary rebuild first uses the verified `.cache/jmdict/jmdict.tgz` archive when available and otherwise downloads the pinned release; it always verifies the source SHA-256. The rebuild also requires `tar`:
 
 ```sh
 bun run data:build

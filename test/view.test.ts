@@ -5,6 +5,9 @@ import {
   displayWidth,
   MIN_TERMINAL_HEIGHT,
   MIN_TERMINAL_WIDTH,
+  renderModelDownloadView,
+  renderPredictionEngineView,
+  renderSettingsView,
   renderView,
   serializeView,
 } from "../src/view";
@@ -38,9 +41,46 @@ describe("view model", () => {
 10|    3 漢字  日本語
 11|
 12|
-13|  i/a edit · Esc normal · j/k/Tab focus · 1/2/3 select · Ent
+13|  i/a edit · Esc normal · s settings · j/k/Tab focus · 1/2/3
 14|"
 `);
+  });
+
+  test("renders Settings labels", () => {
+    const text = serializeView(renderSettingsView("dictionary", 0, 80, 24));
+    expect(text).toContain("Settings");
+    expect(text).toContain("1. Input Mode          Romaji");
+    expect(text).toContain("2. Default Output      Kanji");
+    expect(text).toContain("3. AI Prediction       Off >");
+  });
+
+  test("renders active Prediction Engine radios independently of focused row", () => {
+    const view = renderPredictionEngineView("jinen-small", 0, 80, 24);
+    const text = serializeView(view);
+    expect(text).toContain("› ○ Dictionary only");
+    expect(text).toContain("○ Jinen xsmall");
+    expect(text).toContain("● Jinen small");
+    expect(view.selectedRow).toBe(0);
+    expect(view.backend).toBe("jinen-small");
+  });
+
+  test("renders model download labels and button focus", () => {
+    const download = renderModelDownloadView("jinen-xsmall", 0, 80, 24);
+    const cancel = renderModelDownloadView("jinen-xsmall", 1, 80, 24);
+    const downloadLine = download.lines.find((line) => line.y === 10);
+    const cancelLine = cancel.lines.find((line) => line.y === 10);
+    expect(serializeView(download)).toContain("Jinen xsmall is not installed.");
+    expect(serializeView(download)).toContain("Download and enable?");
+    expect(serializeView(download)).toContain("[ Download ]");
+    expect(serializeView(download)).toContain("[ Cancel ]");
+    expect(downloadLine?.spans[0]).toEqual({
+      text: "[ Download ]",
+      tone: "accent",
+    });
+    expect(cancelLine?.spans[2]).toEqual({
+      text: "[ Cancel ]",
+      tone: "accent",
+    });
   });
 
   test("shows insert cursor style, selected state, and status", () => {
@@ -79,6 +119,86 @@ describe("view model", () => {
     expect(displayWidth(shown)).toBeLessThanOrEqual(42);
     expect(view.cursor.x).toBeLessThan(60);
     expect(shown).toMatch(/^[日本語]+$/u);
+  });
+
+  test("renders enabled prediction model in header and status", () => {
+    const xsmall = renderView(createInitialState("nihongo"), preview, 80, 20, {
+      backend: "jinen-xsmall",
+    });
+    const xsmallText = serializeView(xsmall);
+    expect(xsmallText).toContain("jpn  Japanese composer  ·  Jinen xsmall");
+    expect(xsmallText).toContain("Kanji │ AI: Jinen xsmall");
+
+    const small = renderView(createInitialState("nihongo"), preview, 80, 20, {
+      backend: "jinen-small",
+    });
+    const smallText = serializeView(small);
+    expect(smallText).toContain("jpn  Japanese composer  ·  Jinen small");
+    expect(smallText).toContain("Kanji │ AI: Jinen small");
+
+    const dict = renderView(createInitialState("nihongo"), preview, 80, 20, {
+      backend: "dictionary",
+    });
+    const dictText = serializeView(dict);
+    expect(dictText).toContain("jpn  Japanese composer");
+    expect(dictText).not.toContain("·  Jinen");
+    expect(dictText).not.toContain("Kanji │ AI:");
+  });
+
+  test("renders AI provenance, exact engine input, and result", () => {
+    const processing = serializeView(
+      renderView(createInitialState("tabemono"), preview, 80, 20, {
+        backend: "jinen-xsmall",
+        prediction: {
+          phase: "processing",
+          input: { reading: "たべもの", context: "昨日の食事" },
+        },
+      }),
+    );
+    expect(processing).toContain("Kanji │ AI: Jinen xsmall · Processing…");
+    expect(processing).toContain(
+      "AI input: reading=たべもの context=昨日の食事",
+    );
+    expect(processing).not.toContain("result=");
+
+    const generated = serializeView(
+      renderView(createInitialState("tabemono"), preview, 80, 20, {
+        backend: "jinen-xsmall",
+        prediction: {
+          phase: "generated",
+          input: { reading: "たべもの", context: "昨日の食事" },
+          result: "食べ物",
+        },
+      }),
+    );
+    expect(generated).toContain("Kanji │ AI: Jinen xsmall · Generated");
+    expect(generated).toContain(
+      "AI input: reading=たべもの context=昨日の食事 → result=食べ物",
+    );
+
+    const skipped = serializeView(
+      renderView(createInitialState(), preview, 80, 20, {
+        backend: "jinen-xsmall",
+        prediction: { phase: "skipped", reason: "no eligible input" },
+      }),
+    );
+    expect(skipped).toContain("Kanji │ AI: Jinen xsmall · Skipped");
+    expect(skipped).toContain("AI input: not sent (no eligible input)");
+  });
+
+  test("sanitizes terminal controls in prediction details", () => {
+    const text = serializeView(
+      renderView(createInitialState(), preview, 80, 20, {
+        backend: "jinen-xsmall",
+        prediction: {
+          phase: "generated",
+          input: { reading: "あ\u001b[31m", context: "\n" },
+          result: "漢字\u0007",
+        },
+      }),
+    );
+    expect(text).toContain("reading=あ�[31m context=� → result=漢字�");
+    expect(text).not.toContain("\u001b");
   });
 });
 

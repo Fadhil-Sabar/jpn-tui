@@ -47,6 +47,8 @@ const namedKeys: Readonly<Record<string, string>> = {
   right: "Right",
   home: "Home",
   end: "End",
+  up: "Up",
+  down: "Down",
 };
 
 /** Translate OpenTUI 0.5 key events into the composer reducer vocabulary. */

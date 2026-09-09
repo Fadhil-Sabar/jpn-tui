@@ -19,11 +19,12 @@
     "data:build": "bun scripts/build-dictionary.ts",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
-    "build": "rm -rf dist && bun build src/index.ts --target bun --external @opentui/core --outfile dist/jpn.js && chmod +x dist/jpn.js",
+    "build": "rm -rf dist && bun build src/index.ts --target bun --external @opentui/core --external node-llama-cpp --outfile dist/jpn.js && chmod +x dist/jpn.js",
     "smoke": "bun -e 'import(\"./dist/jpn.js\").then(m => { if (typeof m.launchTui !== \"function\") throw new Error(\"missing launchTui export\") })'"
   },
   "dependencies": {
     "@opentui/core": "0.5.11",
+    "node-llama-cpp": "3.20.0",
     "wanakana": "5.3.1"
   },
   "devDependencies": {
