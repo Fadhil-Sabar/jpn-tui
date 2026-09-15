@@ -674,7 +674,7 @@ export function renderModelDownloadView(
     line(2, dimensions.height - 2, dimensions.width, [
       {
         text: options.downloading
-          ? "Downloading…"
+          ? "Downloading… · Esc cancel"
           : "Tab/arrows select · Enter confirm · Esc back",
         tone: "muted",
       },

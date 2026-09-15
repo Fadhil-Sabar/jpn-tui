@@ -41,7 +41,7 @@ interface SessionFakes {
   readonly config?: PredictionConfig;
   readonly convert?: (value: string) => ConversionResult;
   readonly saveConfig?: (config: PredictionConfig) => void;
-  readonly isModelInstalled?: (backend: JinenBackend) => boolean;
+  readonly isModelInstalled?: (backend: JinenBackend) => Promise<boolean>;
   readonly downloadModel?: (
     backend: JinenBackend,
     options?: ModelDownloadOptions,
@@ -66,7 +66,7 @@ function makeSession(options: SessionFakes = {}): {
       convert: options.convert ?? converted,
       config: options.config ?? { backend: "dictionary" },
       saveConfig: options.saveConfig ?? (() => {}),
-      isModelInstalled: options.isModelInstalled ?? (() => false),
+      isModelInstalled: options.isModelInstalled ?? (async () => true),
       downloadModel: options.downloadModel ?? (async () => "fake-model"),
       predictionEngineFactory:
         options.predictionEngineFactory ??
@@ -84,7 +84,7 @@ function press(session: TuiSession, name: string, sequence = name): void {
   session.key({ name, sequence });
 }
 
-function openXsmallEngine(session: TuiSession): void {
+async function openXsmallEngine(session: TuiSession): Promise<void> {
   press(session, "s");
   press(session, "j");
   press(session, "j");
@@ -92,6 +92,8 @@ function openXsmallEngine(session: TuiSession): void {
   if (session.snapshot.screen === "prediction-engine") {
     if (session.snapshot.selectedRow === 0) press(session, "j");
     press(session, "return", "\r");
+    // Engine selection hash-verifies the installed model asynchronously.
+    await settlePrediction();
   }
 }
 
@@ -171,27 +173,27 @@ describe("help overlay navigation", () => {
 });
 
 describe("TuiSession optional prediction", () => {
-  test("does not download until explicit confirmation", () => {
+  test("does not download until explicit confirmation", async () => {
     let downloads = 0;
     const fixture = makeSession({
-      isModelInstalled: () => false,
+      isModelInstalled: async () => false,
       downloadModel: async () => {
         downloads += 1;
         return "fake-model";
       },
     });
 
-    openXsmallEngine(fixture.session);
+    await openXsmallEngine(fixture.session);
     expect(fixture.session.snapshot.screen).toBe("model-download");
     expect(downloads).toBe(0);
     fixture.completion.finish({ type: "quit" });
   });
 
-  test("activates an installed model without downloading", () => {
+  test("activates an installed model without downloading", async () => {
     const saved: PredictionConfig[] = [];
     let downloads = 0;
     const fixture = makeSession({
-      isModelInstalled: () => true,
+      isModelInstalled: async () => true,
       downloadModel: async () => {
         downloads += 1;
         return "fake-model";
@@ -199,7 +201,7 @@ describe("TuiSession optional prediction", () => {
       saveConfig: (config) => saved.push(config),
     });
 
-    openXsmallEngine(fixture.session);
+    await openXsmallEngine(fixture.session);
     expect(fixture.session.snapshot).toMatchObject({
       screen: "settings",
       backend: "jinen-xsmall",
@@ -215,7 +217,7 @@ describe("TuiSession optional prediction", () => {
     const renders: TuiView[] = [];
     let downloads = 0;
     const fixture = makeSession({
-      isModelInstalled: () => false,
+      isModelInstalled: async () => false,
       downloadModel: async () => {
         downloads += 1;
         return download.promise;
@@ -224,7 +226,7 @@ describe("TuiSession optional prediction", () => {
       render: (view) => renders.push(view),
     });
 
-    openXsmallEngine(fixture.session);
+    await openXsmallEngine(fixture.session);
     press(fixture.session, "return", "\r");
     expect(downloads).toBe(1);
     expect(saved).toEqual([]);
@@ -242,11 +244,11 @@ describe("TuiSession optional prediction", () => {
     fixture.completion.finish({ type: "quit" });
   });
 
-  test("cancel leaves an uninstalled backend inactive", () => {
+  test("cancel leaves an uninstalled backend inactive", async () => {
     const saved: PredictionConfig[] = [];
     let downloads = 0;
     const fixture = makeSession({
-      isModelInstalled: () => false,
+      isModelInstalled: async () => false,
       downloadModel: async () => {
         downloads += 1;
         return "fake-model";
@@ -254,7 +256,7 @@ describe("TuiSession optional prediction", () => {
       saveConfig: (config) => saved.push(config),
     });
 
-    openXsmallEngine(fixture.session);
+    await openXsmallEngine(fixture.session);
     press(fixture.session, "tab", "\t");
     press(fixture.session, "return", "\r");
     expect(fixture.session.snapshot.screen).toBe("prediction-engine");
@@ -267,14 +269,14 @@ describe("TuiSession optional prediction", () => {
     const pending = deferred<unknown>();
     let downloads = 0;
     const fixture = makeSession({
-      isModelInstalled: () => false,
+      isModelInstalled: async () => false,
       downloadModel: async () => {
         downloads += 1;
         return pending.promise;
       },
     });
 
-    openXsmallEngine(fixture.session);
+    await openXsmallEngine(fixture.session);
     press(fixture.session, "return", "\r");
     expect(downloads).toBe(1);
     fixture.session.key({ name: "c", sequence: "\x03", ctrl: true });
@@ -282,11 +284,149 @@ describe("TuiSession optional prediction", () => {
     pending.resolve("fake-model");
   });
 
+  test("Escape cancels an active download and ignores late progress", async () => {
+    const pending = deferred<unknown>();
+    let reported: ((downloaded: number, total?: number) => void) | undefined;
+    let aborted = false;
+    const fixture = makeSession({
+      isModelInstalled: async () => false,
+      downloadModel: (_backend, options) => {
+        reported = options?.onProgress;
+        options?.signal?.addEventListener("abort", () => {
+          aborted = true;
+        });
+        return pending.promise;
+      },
+    });
+
+    await openXsmallEngine(fixture.session);
+    press(fixture.session, "return", "\r");
+    expect(fixture.session.snapshot.screen).toBe("model-download");
+
+    press(fixture.session, "escape", "\x1b");
+    expect(aborted).toBe(true);
+    expect(fixture.session.snapshot.screen).toBe("prediction-engine");
+
+    reported?.(500, 1_000);
+    expect(composerText(fixture.session)).not.toContain("Downloading");
+    fixture.completion.finish({ type: "quit" });
+  });
+
+  test("shutdown aborts an active download", async () => {
+    const pending = deferred<unknown>();
+    let aborted = false;
+    const fixture = makeSession({
+      isModelInstalled: async () => false,
+      downloadModel: (_backend, options) => {
+        options?.signal?.addEventListener("abort", () => {
+          aborted = true;
+        });
+        return pending.promise;
+      },
+    });
+
+    await openXsmallEngine(fixture.session);
+    press(fixture.session, "return", "\r");
+    expect(aborted).toBe(false);
+
+    fixture.completion.finish({ type: "interrupt" });
+    expect(aborted).toBe(true);
+    expect(await fixture.completion.promise).toBe(130);
+    pending.resolve("late");
+  });
+
+  test("an unavailable model falls back without any network access", async () => {
+    let downloads = 0;
+    const fixture = makeSession({
+      config: { backend: "jinen-xsmall" },
+      isModelInstalled: async () => false,
+      downloadModel: async () => {
+        downloads += 1;
+        return "fake-model";
+      },
+    });
+
+    press(fixture.session, "i");
+    fixture.session.paste("あ");
+    await settlePrediction();
+    expect(downloads).toBe(0);
+    expect(composerText(fixture.session)).toContain("3 漢字  辞書:あ");
+    expect(composerText(fixture.session)).toContain(
+      "Kanji │ AI: Jinen xsmall · Failed → dictionary fallback",
+    );
+    fixture.completion.finish({ type: "quit" });
+  });
+
+  test("changing the input aborts the in-flight prediction", async () => {
+    let captured: AbortSignal | undefined;
+    const fixture = makeSession({
+      config: { backend: "jinen-xsmall" },
+      predictionEngineFactory: (backend) => ({
+        id: backend,
+        predict: (_input, options) => {
+          captured = options?.signal;
+          return new Promise<string>((_resolve, reject) => {
+            options?.signal?.addEventListener("abort", () =>
+              reject(new Error("aborted")),
+            );
+          });
+        },
+      }),
+    });
+
+    press(fixture.session, "i");
+    fixture.session.paste("あ");
+    await settlePrediction();
+    expect(captured?.aborted).toBe(false);
+
+    fixture.session.paste("い");
+    expect(captured?.aborted).toBe(true);
+    fixture.completion.finish({ type: "quit" });
+  });
+
+  test("changing the backend aborts the in-flight prediction", async () => {
+    let captured: AbortSignal | undefined;
+    const fixture = makeSession({
+      config: { backend: "jinen-xsmall" },
+      predictionEngineFactory: (backend) => ({
+        id: backend,
+        predict: (_input, options) => {
+          captured = options?.signal;
+          return new Promise<string>((_resolve, reject) => {
+            options?.signal?.addEventListener("abort", () =>
+              reject(new Error("aborted")),
+            );
+          });
+        },
+      }),
+    });
+
+    press(fixture.session, "i");
+    fixture.session.paste("あ");
+    await settlePrediction();
+    expect(captured?.aborted).toBe(false);
+
+    press(fixture.session, "escape", "\x1b");
+    press(fixture.session, "s");
+    press(fixture.session, "j");
+    press(fixture.session, "j");
+    press(fixture.session, "return", "\r");
+    press(fixture.session, "1");
+    press(fixture.session, "return", "\r");
+
+    expect(fixture.session.snapshot).toMatchObject({
+      screen: "settings",
+      backend: "dictionary",
+    });
+    expect(captured?.aborted).toBe(true);
+    fixture.completion.finish({ type: "quit" });
+  });
+
   test("a failed download leaves the backend inactive and keeps error visible", async () => {
     const saved: PredictionConfig[] = [];
     const renders: TuiView[] = [];
     const fixture = makeSession({
-      isModelInstalled: () => false,
+      isModelInstalled: async () => false,
       downloadModel: async () => {
         throw new Error("offline");
       },
@@ -294,7 +434,7 @@ describe("TuiSession optional prediction", () => {
       render: (view) => renders.push(view),
     });
 
-    openXsmallEngine(fixture.session);
+    await openXsmallEngine(fixture.session);
     press(fixture.session, "return", "\r");
     await settlePrediction();
     expect(fixture.session.snapshot.screen).toBe("model-download");

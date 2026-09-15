@@ -7,7 +7,13 @@ import {
   graphemes,
   handleKey,
   keyAction,
+  pasteAction,
+  sanitizePasteText,
 } from "../src/composer";
+
+function paste(state: ComposerState, text: string): ComposerState {
+  return composerReducer(state, pasteAction(text)).state;
+}
 
 function step(
   state: ComposerState,
@@ -173,6 +179,54 @@ describe("grapheme-safe INSERT mode", () => {
     expect(state.buffer).toBe("b");
     state = handleKey(state, "\x1b").state;
     expect(state.mode).toBe("NORMAL");
+  });
+});
+
+describe("paste action", () => {
+  test("inserts sanitized text directly as one undoable edit", () => {
+    const state = paste(step(createInitialState({ buffer: "ab" }), "i"), "cd");
+    expect(state.buffer).toBe("cdab");
+    expect(state.cursor).toBe(2);
+    expect(state.undo).toHaveLength(1);
+
+    const undone = step(step(state, "Esc"), "u");
+    expect(undone.buffer).toBe("ab");
+  });
+
+  test("ignores paste while NORMAL and leaves the register untouched", () => {
+    const state = paste(createInitialState({ buffer: "ab" }), "cd");
+    expect(state.buffer).toBe("ab");
+    expect(state.undo).toEqual([]);
+  });
+
+  test("removes controls, unpaired surrogates, and line separators", () => {
+    expect(sanitizePasteText("a\u0000b\u001bc\r\nd\u2028e\u2029f\ud800g")).toBe(
+      "abcdefg",
+    );
+  });
+
+  test("keeps emoji joiners, marks, and regional indicators intact", () => {
+    const state = paste(
+      step(createInitialState(), "i"),
+      "👩🏽‍💻e\u0301🇯🇵👨‍👩‍👧",
+    );
+    expect(graphemes(state.buffer)).toEqual([
+      "👩🏽‍💻",
+      "e\u0301",
+      "🇯🇵",
+      "👨‍👩‍👧",
+    ]);
+    expect(state.cursor).toBe(4);
+  });
+
+  test("a large paste is one history entry and stays bounded by the limit", () => {
+    const state = paste(
+      step(createInitialState({ historyLimit: 5 }), "i"),
+      "あ".repeat(10_000),
+    );
+    expect(state.buffer).toHaveLength(10_000);
+    expect(state.undo).toHaveLength(1);
+    expect(step(step(state, "Esc"), "u").buffer).toBe("");
   });
 });
 

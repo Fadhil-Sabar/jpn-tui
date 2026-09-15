@@ -86,7 +86,7 @@ export interface TuiSessionOptions {
   readonly statusDurationMs?: number;
   readonly config?: PredictionConfig;
   readonly saveConfig?: (config: PredictionConfig) => void;
-  readonly isModelInstalled?: (backend: JinenBackend) => boolean;
+  readonly isModelInstalled?: (backend: JinenBackend) => Promise<boolean>;
   readonly downloadModel?: (
     backend: JinenBackend,
     options?: ModelDownloadOptions,
@@ -137,6 +137,11 @@ export class TuiSession {
   private statusTimer: ReturnType<typeof setTimeout> | undefined;
   private predictionTimer: ReturnType<typeof setTimeout> | undefined;
   private predictionVersion = 0;
+  private predictionAbort: AbortController | null = null;
+  private readonly modelAvailability = new Map<
+    JinenBackend,
+    Promise<boolean>
+  >();
   private prediction: PredictionViewState = {
     phase: "skipped",
     reason: "no eligible input",
@@ -145,7 +150,7 @@ export class TuiSession {
   private readonly convertValue: (value: string) => ConversionResult;
   private readonly copyToClipboard: ClipboardCopy;
   private readonly save: (config: PredictionConfig) => void;
-  private readonly installed: (backend: JinenBackend) => boolean;
+  private readonly installed: (backend: JinenBackend) => Promise<boolean>;
   private readonly download: (
     backend: JinenBackend,
     options?: ModelDownloadOptions,
@@ -159,12 +164,20 @@ export class TuiSession {
   private confirmationBackend: JinenBackend | null = null;
   private confirmationButton = 0;
   private downloading = false;
+  private engineVerifyToken = 0;
+  private downloadToken = 0;
+  private downloadAbort: AbortController | null = null;
+  private copyToken = 0;
+  private copyBusy = false;
+  private copyAbort: AbortController | null = null;
 
   constructor(private readonly options: TuiSessionOptions) {
     this.width = options.width ?? 80;
     this.height = options.height ?? 24;
     this.convertValue = options.convert ?? convert;
-    this.copyToClipboard = options.copyToClipboard ?? copyToNativeClipboard;
+    this.copyToClipboard =
+      options.copyToClipboard ??
+      ((value, signal) => copyToNativeClipboard(value, { signal }));
     this.backend = options.config?.backend ?? "dictionary";
     this.save = options.saveConfig ?? savePredictionConfig;
     this.installed = options.isModelInstalled ?? isModelInstalled;
@@ -175,6 +188,8 @@ export class TuiSession {
     options.completion.addCleanup(() => {
       if (this.statusTimer !== undefined) clearTimeout(this.statusTimer);
       this.cancelPrediction();
+      this.cancelCopy();
+      this.cancelDownload();
     });
   }
 
@@ -366,6 +381,10 @@ export class TuiSession {
       clearTimeout(this.predictionTimer);
       this.predictionTimer = undefined;
     }
+    // Abort the in-flight request so the native model stops generating instead
+    // of finishing work whose result will be discarded.
+    this.predictionAbort?.abort();
+    this.predictionAbort = null;
   }
 
   private schedulePrediction(): void {
@@ -399,12 +418,53 @@ export class TuiSession {
     const fallback = this.basePreview.kanji;
     const context = leftJapaneseContext(buffer);
     const input: PredictionInput = { reading, context };
+    const controller = new AbortController();
+    this.predictionAbort = controller;
     this.prediction = { phase: "processing", input };
     this.predictionTimer = setTimeout(() => {
       this.predictionTimer = undefined;
-      void this.runPrediction(version, backend, buffer, input, fallback);
+      void this.runPrediction(
+        version,
+        backend,
+        buffer,
+        input,
+        fallback,
+        controller.signal,
+      );
     }, this.debounceDuration);
     this.predictionTimer.unref?.();
+  }
+
+  /** True once this request has been superseded, cancelled, or shut down. */
+  private stalePrediction(
+    version: number,
+    backend: JinenBackend,
+    buffer: string,
+    signal: AbortSignal,
+  ): boolean {
+    return (
+      this.options.completion.done ||
+      signal.aborted ||
+      version !== this.predictionVersion ||
+      this.backend !== backend ||
+      this.state.buffer !== buffer
+    );
+  }
+
+  /**
+   * Hash-verify a model once per session before it is handed to llama. The
+   * check is local and offline; a missing or corrupt file stays unavailable
+   * and the deterministic dictionary result is used instead.
+   */
+  private verifyAvailable(backend: JinenBackend): Promise<boolean> {
+    let verification = this.modelAvailability.get(backend);
+    if (!verification) {
+      verification = Promise.resolve()
+        .then(() => this.installed(backend))
+        .catch(() => false);
+      this.modelAvailability.set(backend, verification);
+    }
+    return verification;
   }
 
   private async runPrediction(
@@ -413,15 +473,27 @@ export class TuiSession {
     buffer: string,
     input: PredictionInput,
     fallback: string,
+    signal: AbortSignal,
   ): Promise<void> {
-    if (
-      this.options.completion.done ||
-      version !== this.predictionVersion ||
-      this.backend !== backend ||
-      this.state.buffer !== buffer
-    ) {
+    if (this.stalePrediction(version, backend, buffer, signal)) return;
+
+    const available = await this.verifyAvailable(backend);
+    if (this.stalePrediction(version, backend, buffer, signal)) return;
+    if (!available) {
+      this.preview = { ...this.basePreview, kanji: fallback };
+      this.prediction = {
+        phase: "failed",
+        input,
+        result: fallback,
+        reason: "model not installed or corrupt",
+      };
+      this.showStatus(
+        `${getModelMetadata(backend).label} unavailable — press s to reinstall`,
+      );
+      this.draw();
       return;
     }
+
     let engine: PredictionEngine;
     try {
       engine = this.engines.get(backend) ?? this.makeEngine(backend);
@@ -440,16 +512,9 @@ export class TuiSession {
     }
     let generated: string;
     try {
-      generated = await engine.predict(input);
+      generated = await engine.predict(input, { signal });
     } catch (error) {
-      if (
-        this.options.completion.done ||
-        version !== this.predictionVersion ||
-        this.backend !== backend ||
-        this.state.buffer !== buffer
-      ) {
-        return;
-      }
+      if (this.stalePrediction(version, backend, buffer, signal)) return;
       this.preview = { ...this.basePreview, kanji: fallback };
       this.prediction = {
         phase: "failed",
@@ -460,14 +525,7 @@ export class TuiSession {
       this.draw();
       return;
     }
-    if (
-      this.options.completion.done ||
-      version !== this.predictionVersion ||
-      this.backend !== backend ||
-      this.state.buffer !== buffer
-    ) {
-      return;
-    }
+    if (this.stalePrediction(version, backend, buffer, signal)) return;
     // Never replace the deterministic kana rows; only the Kanji preview is
     // owned by asynchronous prediction. A valid prediction is upgraded with
     // the dictionary so it cannot under-convert below the deterministic row.
@@ -541,14 +599,24 @@ export class TuiSession {
         this.engineFocus = next;
         return;
       }
-      if (key === "Enter") this.selectEngine(this.engineFocus);
+      if (key === "Enter") void this.selectEngine(this.engineFocus);
       return;
     }
 
     if (this.screen !== "model-download" || this.confirmationBackend === null) {
       return;
     }
-    if (this.downloading) return;
+    if (this.downloading) {
+      // Escape is the only key that does anything mid-download: it cancels and
+      // returns to engine selection.
+      if (key === "Esc") {
+        this.cancelDownload();
+        this.screen = "prediction-engine";
+        this.clearStatus();
+        this.draw();
+      }
+      return;
+    }
     if (key === "Esc") {
       this.screen = "prediction-engine";
       this.clearStatus();
@@ -576,7 +644,7 @@ export class TuiSession {
     }
   }
 
-  private selectEngine(row: number): void {
+  private async selectEngine(row: number): Promise<void> {
     const backend: PredictionBackend =
       row === 0 ? "dictionary" : row === 1 ? "jinen-xsmall" : "jinen-small";
     this.engineFocus = row;
@@ -584,16 +652,26 @@ export class TuiSession {
       this.activateBackend(backend);
       return;
     }
+    // Hash-verify the existing file before it can be activated. Verification is
+    // asynchronous, so a newer selection or navigation invalidates this one.
+    const token = ++this.engineVerifyToken;
     let installed = false;
     try {
-      installed = this.installed(backend);
+      installed = await this.installed(backend);
     } catch (error) {
+      if (token !== this.engineVerifyToken || this.options.completion.done)
+        return;
       this.showStatus(
         `Unable to check ${getModelMetadata(backend).label}: ${messageOf(error)}`,
       );
+      this.draw();
       return;
     }
+    if (token !== this.engineVerifyToken || this.options.completion.done)
+      return;
+    if (this.screen !== "prediction-engine") return;
     if (installed) {
+      this.modelAvailability.set(backend, Promise.resolve(true));
       this.activateBackend(backend);
       return;
     }
@@ -602,6 +680,7 @@ export class TuiSession {
     this.downloading = false;
     this.screen = "model-download";
     this.clearStatus();
+    this.draw();
   }
 
   private activateBackend(backend: PredictionBackend): void {
@@ -625,10 +704,16 @@ export class TuiSession {
 
   private startDownload(backend: JinenBackend): void {
     if (this.downloading) return;
+    const token = ++this.downloadToken;
+    const controller = new AbortController();
+    this.downloadAbort = controller;
     this.downloading = true;
     this.status = `Downloading ${getModelMetadata(backend).label}… 0%`;
     this.draw();
     const report = (downloaded: number, total?: number): void => {
+      // Late progress after cancellation, shutdown, or a newer download is
+      // discarded rather than being drawn over the current screen.
+      if (token !== this.downloadToken || this.options.completion.done) return;
       const expected =
         total && total > 0 ? total : getModelMetadata(backend).size;
       const percent = Math.max(
@@ -640,25 +725,91 @@ export class TuiSession {
     };
     let result: Promise<unknown>;
     try {
-      result = this.download(backend, { onProgress: report });
+      result = this.download(backend, {
+        onProgress: report,
+        signal: controller.signal,
+      });
     } catch (error) {
-      this.downloadFailed(error);
+      this.downloadFailed(token, error);
       return;
     }
     void Promise.resolve(result).then(
       () => {
-        if (this.options.completion.done) return;
+        if (token !== this.downloadToken || this.options.completion.done)
+          return;
         this.downloading = false;
+        this.downloadAbort = null;
+        this.modelAvailability.set(backend, Promise.resolve(true));
         this.activateBackend(backend);
       },
-      (error: unknown) => this.downloadFailed(error),
+      (error: unknown) => this.downloadFailed(token, error),
     );
   }
 
-  private downloadFailed(error: unknown): void {
+  private downloadFailed(token: number, error: unknown): void {
+    if (token !== this.downloadToken || this.options.completion.done) return;
     this.downloading = false;
+    this.downloadAbort = null;
     this.showStatus(`Download failed: ${messageOf(error)}`);
     this.draw();
+  }
+
+  private cancelDownload(): void {
+    this.downloadToken += 1;
+    this.downloadAbort?.abort();
+    this.downloadAbort = null;
+    this.downloading = false;
+  }
+
+  private startCopy(effect: Extract<AdapterEffect, { type: "yank" }>): void {
+    if (this.copyBusy) {
+      this.showStatus("Copy already in progress…");
+      this.draw();
+      return;
+    }
+    const label = PREVIEW_LABELS[effect.focus] ?? "preview";
+    const summary = clipWithEllipsis(effect.value, 20);
+    const token = ++this.copyToken;
+    const controller = new AbortController();
+    this.copyBusy = true;
+    this.copyAbort = controller;
+    this.showStatus(`Copying ${label}: ${summary}…`);
+    void this.finishCopy(effect, label, summary, token, controller);
+  }
+
+  private async finishCopy(
+    effect: Extract<AdapterEffect, { type: "yank" }>,
+    label: string,
+    summary: string,
+    token: number,
+    controller: AbortController,
+  ): Promise<void> {
+    let copied: NativeClipboardResult | null = null;
+    try {
+      copied = await this.copyToClipboard(effect.value, controller.signal);
+    } catch {
+      // Clipboard integrations are best-effort; preserve the OSC 52 path.
+      copied = null;
+    }
+    // A cancelled copy, a newer copy, or shutdown must never touch the status
+    // line or the terminal again.
+    if (token !== this.copyToken || this.options.completion.done) return;
+    this.copyBusy = false;
+    this.copyAbort = null;
+    if (copied) {
+      this.showStatus(`Copied ${label}: ${summary} via ${copied.backend}`);
+    } else {
+      this.options.terminal.write(effect.sequence);
+      this.showStatus(`OSC 52 fallback sent: ${summary} (unconfirmed)`);
+    }
+    this.draw();
+  }
+
+  private cancelCopy(): void {
+    this.copyToken += 1;
+    this.copyAbort?.abort();
+    this.copyAbort = null;
+    this.copyBusy = false;
   }
 
   private handleEffects(effects: readonly AdapterEffect[]): void {
@@ -668,20 +819,7 @@ export class TuiSession {
           this.showStatus("Nothing to copy — preview is empty");
           continue;
         }
-        const label = PREVIEW_LABELS[effect.focus] ?? "preview";
-        const summary = clipWithEllipsis(effect.value, 20);
-        let copied: NativeClipboardResult | null = null;
-        try {
-          copied = this.copyToClipboard(effect.value);
-        } catch {
-          // Clipboard integrations are best-effort; preserve the OSC 52 path.
-        }
-        if (copied) {
-          this.showStatus(`Copied ${label}: ${summary} via ${copied.backend}`);
-        } else {
-          this.options.terminal.write(effect.sequence);
-          this.showStatus(`OSC 52 fallback sent: ${summary} (unconfirmed)`);
-        }
+        this.startCopy(effect);
       } else if (effect.type === "submit") {
         this.options.completion.finish(effect);
       } else if (effect.type === "quit") {

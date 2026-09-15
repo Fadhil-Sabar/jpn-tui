@@ -2,8 +2,8 @@ import {
   type ComposerEffect,
   type ComposerState,
   composerReducer,
-  graphemes,
   keyAction,
+  pasteAction,
 } from "./composer";
 import type { ConversionResult } from "./converter";
 
@@ -149,26 +149,23 @@ export function applyAdapterKey(
   };
 }
 
-/** Paste only into INSERT mode, one grapheme at a time, after removing CR/LF. */
+/**
+ * Paste only into INSERT mode as one undoable edit, converting the resulting
+ * buffer once. Sanitizing and grapheme-safe caret placement live in the
+ * reducer so every paste caller shares one implementation.
+ */
 export function applyPaste(
   state: ComposerState,
   preview: ConversionResult,
   pasted: string,
   convert: (value: string) => ConversionResult,
 ): AppUpdate {
-  if (state.mode !== "INSERT") {
-    return { state, preview, effects: [] };
-  }
-  let nextState = state;
-  const effects: AdapterEffect[] = [];
-  const oneLine = pasted.replace(/[\r\n]/g, "");
-  for (const part of graphemes(oneLine)) {
-    const result = composerReducer(nextState, keyAction(part));
-    nextState = result.state;
-  }
+  const result = composerReducer(state, pasteAction(pasted));
   const nextPreview =
-    nextState.buffer === state.buffer ? preview : convert(nextState.buffer);
-  return { state: nextState, preview: nextPreview, effects };
+    result.state.buffer === state.buffer
+      ? preview
+      : convert(result.state.buffer);
+  return { state: result.state, preview: nextPreview, effects: [] };
 }
 
 export type CompletionReason =

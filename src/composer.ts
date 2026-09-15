@@ -38,7 +38,12 @@ export interface KeyAction {
   readonly alt?: boolean;
 }
 
-export type ComposerAction = KeyAction;
+export interface PasteAction {
+  readonly type: "paste";
+  readonly text: string;
+}
+
+export type ComposerAction = KeyAction | PasteAction;
 export type Action = ComposerAction;
 
 export interface SubmitEffect {
@@ -181,6 +186,21 @@ export function keyAction(
 
 export const pressKey = keyAction;
 export const press = keyAction;
+
+/** Build the one-shot paste action consumed by the reducer. */
+export function pasteAction(text: string): PasteAction {
+  return { type: "paste", text };
+}
+
+/**
+ * Remove characters that cannot live in the single-line composer: control
+ * characters (including CR/LF), unpaired surrogates, and line/paragraph
+ * separators. Format characters such as the emoji ZWJ and variation
+ * selectors are preserved because they are valid grapheme members.
+ */
+export function sanitizePasteText(value: string): string {
+  return value.replace(/[\p{Cc}\p{Cs}\p{Zl}\p{Zp}]/gu, "");
+}
 
 function normaliseKey(action: KeyAction | string): string {
   let key = typeof action === "string" ? action : action.key;
@@ -711,13 +731,24 @@ function insertKey(state: ComposerState, key: string): ComposerResult {
   }
 }
 
+/** Apply a paste as a single undoable edit, and only while INSERTING. */
+function pasteText(state: ComposerState, text: string): ComposerResult {
+  if (state.mode !== "INSERT") return { state, effects: [] };
+  const clean = sanitizePasteText(text);
+  if (clean.length === 0) return { state, effects: [] };
+  return { state: insertText(state, clean), effects: [] };
+}
+
 /** Pure reducer. No input object or returned state is mutated. */
 export function composerReducer(
   inputState: ComposerState,
   action: ComposerAction | string,
 ): ComposerResult {
   const state = normaliseState(inputState);
-  const key = normaliseKey(action);
+  if (typeof action !== "string" && action.type === "paste") {
+    return pasteText(state, action.text);
+  }
+  const key = normaliseKey(action as KeyAction | string);
 
   // These controls are global so that a terminal interrupt and submit behave
   // identically while editing and while navigating.

@@ -7,9 +7,18 @@ import {
   osc52Sequence,
   selectedPreview,
 } from "../src/app";
-import { createInitialState } from "../src/composer";
+import {
+  composerReducer,
+  createInitialState,
+  graphemes,
+} from "../src/composer";
 import type { ConversionResult } from "../src/converter";
 import { TuiSession } from "../src/tui";
+
+async function settle(): Promise<void> {
+  await Bun.sleep(1);
+  await Promise.resolve();
+}
 
 const converted = (value: string): ConversionResult => ({
   hiragana: `ひ:${value}`,
@@ -103,6 +112,62 @@ describe("OpenTUI adapter", () => {
     expect(pasted.state.buffer).toBe("nihon");
     expect(pasted.preview.kanji).toBe("字:nihon");
   });
+
+  test("paste removes controls, unpaired surrogates, and line separators", () => {
+    const insert = applyAdapterKey(
+      createInitialState(),
+      empty,
+      { key: "i" },
+      converted,
+    );
+    const pasted = applyPaste(
+      insert.state,
+      insert.preview,
+      "a\u0000b\u001bc\u0007d\u007fe\u2028f\u2029g\ud800h\u0085i",
+      converted,
+    );
+    expect(pasted.state.buffer).toBe("abcdefghi");
+  });
+
+  test("paste preserves emoji and combining clusters at a grapheme boundary", () => {
+    const insert = applyAdapterKey(
+      createInitialState(),
+      empty,
+      { key: "i" },
+      converted,
+    );
+    const pasted = applyPaste(
+      insert.state,
+      insert.preview,
+      "👩🏽‍💻é🇯🇵",
+      converted,
+    );
+    expect(graphemes(pasted.state.buffer)).toEqual(["👩🏽‍💻", "é", "🇯🇵"]);
+    expect(pasted.state.cursor).toBe(3);
+  });
+
+  test("a large paste is a single undo step that converts once", () => {
+    let conversions = 0;
+    const counting = (value: string): ConversionResult => {
+      conversions += 1;
+      return converted(value);
+    };
+    const insert = applyAdapterKey(
+      createInitialState(),
+      empty,
+      { key: "i" },
+      counting,
+    );
+    const text = "あ".repeat(5_000);
+    const pasted = applyPaste(insert.state, insert.preview, text, counting);
+    expect(pasted.state.buffer).toBe(text);
+    expect(pasted.state.undo).toHaveLength(1);
+    expect(conversions).toBe(1);
+
+    const normal = composerReducer(pasted.state, "Esc").state;
+    const undone = composerReducer(normal, "u");
+    expect(undone.state.buffer).toBe("");
+  });
 });
 
 describe("completion and session effects", () => {
@@ -162,7 +227,7 @@ describe("completion and session effects", () => {
     expect(await interrupt.promise).toBe(130);
   });
 
-  test("y prefers an injected native clipboard and reports its backend", () => {
+  test("y prefers an injected native clipboard and reports its backend", async () => {
     const terminal: string[] = [];
     const copied: string[] = [];
     const completion = new Completion(memoryStream(), memoryStream());
@@ -171,7 +236,7 @@ describe("completion and session effects", () => {
       completion,
       terminal: memoryStream(terminal),
       convert: converted,
-      copyToClipboard: (value) => {
+      copyToClipboard: async (value) => {
         copied.push(value);
         return { backend: "xclip" };
       },
@@ -186,13 +251,14 @@ describe("completion and session effects", () => {
     session.paste("nihon");
     session.key({ name: "escape", sequence: "\x1b" });
     session.key({ name: "y", sequence: "y" });
+    await settle();
     expect(copied).toEqual(["ひ:nihon"]);
     expect(terminal).toEqual([]);
     expect(rendered).toContain("Copied ひらがな: ひ:nihon via xclip");
     completion.finish({ type: "quit" });
   });
 
-  test("y reports the focused row label and clipboard backend", () => {
+  test("y reports the focused row label and clipboard backend", async () => {
     const terminal: string[] = [];
     const completion = new Completion(memoryStream(), memoryStream());
     let rendered = "";
@@ -200,7 +266,7 @@ describe("completion and session effects", () => {
       completion,
       terminal: memoryStream(terminal),
       convert: converted,
-      copyToClipboard: () => ({ backend: "wl-copy" }),
+      copyToClipboard: async () => ({ backend: "wl-copy" }),
       statusDurationMs: 60_000,
       render: (view) => {
         rendered = view.lines
@@ -213,6 +279,7 @@ describe("completion and session effects", () => {
     session.key({ name: "escape", sequence: "\x1b" });
     session.key({ name: "3", sequence: "3" });
     session.key({ name: "y", sequence: "y" });
+    await settle();
     expect(rendered).toContain("Copied 漢字: 字:nihon via wl-copy");
     completion.finish({ type: "quit" });
   });
@@ -226,7 +293,7 @@ describe("completion and session effects", () => {
       completion,
       terminal: memoryStream(terminal),
       convert: converted,
-      copyToClipboard: () => {
+      copyToClipboard: async () => {
         copyCalls += 1;
         return { backend: "xclip" };
       },
@@ -244,7 +311,7 @@ describe("completion and session effects", () => {
     completion.finish({ type: "quit" });
   });
 
-  test("a truncated preview value is summarized with an ellipsis", () => {
+  test("a truncated preview value is summarized with an ellipsis", async () => {
     const completion = new Completion(memoryStream(), memoryStream());
     let rendered = "";
     const long = "a".repeat(40);
@@ -252,7 +319,7 @@ describe("completion and session effects", () => {
       completion,
       terminal: memoryStream(),
       convert: () => ({ hiragana: long, katakana: "", kanji: "" }),
-      copyToClipboard: () => ({ backend: "xclip" }),
+      copyToClipboard: async () => ({ backend: "xclip" }),
       statusDurationMs: 60_000,
       render: (view) => {
         rendered = view.lines
@@ -264,11 +331,12 @@ describe("completion and session effects", () => {
     session.paste("a");
     session.key({ name: "escape", sequence: "\x1b" });
     session.key({ name: "y", sequence: "y" });
+    await settle();
     expect(rendered).toContain(`Copied ひらがな: ${"a".repeat(19)}… via xclip`);
     completion.finish({ type: "quit" });
   });
 
-  test("y emits OSC 52 with an unconfirmed status when native copy fails", () => {
+  test("y emits OSC 52 with an unconfirmed status when native copy fails", async () => {
     const terminal: string[] = [];
     const completion = new Completion(memoryStream(), memoryStream());
     let rendered = "";
@@ -276,7 +344,7 @@ describe("completion and session effects", () => {
       completion,
       terminal: memoryStream(terminal),
       convert: converted,
-      copyToClipboard: () => null,
+      copyToClipboard: async () => null,
       statusDurationMs: 60_000,
       render: (view) => {
         rendered = view.lines
@@ -288,10 +356,85 @@ describe("completion and session effects", () => {
     session.paste("nihon");
     session.key({ name: "escape", sequence: "\x1b" });
     session.key({ name: "y", sequence: "y" });
+    await settle();
     expect(terminal).toEqual([osc52Sequence("ひ:nihon")]);
     expect(rendered).toContain("OSC 52 fallback sent: ひ:nihon (unconfirmed)");
     expect(rendered).not.toContain("Copied via");
     completion.finish({ type: "quit" });
+  });
+
+  test("a second y while a copy is pending is refused without a second call", async () => {
+    const completion = new Completion(memoryStream(), memoryStream());
+    let rendered = "";
+    let release!: (value: { backend: "xclip" } | null) => void;
+    let calls = 0;
+    const session = new TuiSession({
+      completion,
+      terminal: memoryStream(),
+      convert: converted,
+      copyToClipboard: () => {
+        calls += 1;
+        return new Promise((resolve) => {
+          release = resolve;
+        });
+      },
+      statusDurationMs: 60_000,
+      render: (view) => {
+        rendered = view.lines
+          .flatMap((line) => line.spans.map((span) => span.text))
+          .join("");
+      },
+    });
+    session.key({ name: "i", sequence: "i" });
+    session.paste("nihon");
+    session.key({ name: "escape", sequence: "\x1b" });
+    session.key({ name: "y", sequence: "y" });
+    expect(rendered).toContain("Copying ひらがな: ひ:nihon…");
+    session.key({ name: "y", sequence: "y" });
+    expect(calls).toBe(1);
+    expect(rendered).toContain("Copy already in progress…");
+    release({ backend: "xclip" });
+    await settle();
+    expect(rendered).toContain("Copied ひらがな: ひ:nihon via xclip");
+    completion.finish({ type: "quit" });
+  });
+
+  test("shutdown during a copy suppresses the late status and terminal write", async () => {
+    const terminal: string[] = [];
+    const completion = new Completion(memoryStream(), memoryStream());
+    let rendered = "";
+    let release!: (value: { backend: "xclip" } | null) => void;
+    let aborted = false;
+    const session = new TuiSession({
+      completion,
+      terminal: memoryStream(terminal),
+      convert: converted,
+      copyToClipboard: (_value, signal) => {
+        signal?.addEventListener("abort", () => {
+          aborted = true;
+        });
+        return new Promise((resolve) => {
+          release = resolve;
+        });
+      },
+      statusDurationMs: 60_000,
+      render: (view) => {
+        rendered = view.lines
+          .flatMap((line) => line.spans.map((span) => span.text))
+          .join("");
+      },
+    });
+    session.key({ name: "i", sequence: "i" });
+    session.paste("nihon");
+    session.key({ name: "escape", sequence: "\x1b" });
+    session.key({ name: "y", sequence: "y" });
+    completion.finish({ type: "interrupt" });
+    expect(aborted).toBe(true);
+    release(null);
+    await settle();
+    expect(terminal).toEqual([]);
+    expect(rendered).not.toContain("OSC 52 fallback sent");
+    expect(await completion.promise).toBe(130);
   });
 
   test("dictionary-style errors finish through fatal cleanup", async () => {

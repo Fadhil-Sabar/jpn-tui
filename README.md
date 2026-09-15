@@ -58,7 +58,7 @@ The composer footer shows only the bindings that work in the current mode, so it
 
 | Key | Action |
 | --- | --- |
-| Printable Unicode / paste | Insert text (pasted CR/LF characters are removed) |
+| Printable Unicode / paste | Insert text (each paste is one undo step; control characters and line separators are removed) |
 | `Esc` | Return to Normal mode |
 | `Backspace`, `Delete` | Delete before or at the caret |
 | `Left`, `Right`, `Home`, `End` | Move the caret |
@@ -89,6 +89,8 @@ Examples:
 
 If no applicable native command succeeds, `jpn` sends the existing OSC 52 sequence for SSH, minimal systems, and compatible terminals. The status line names the copied row and echoes a shortened value, for example `Copied 漢字: 日本語 via wl-copy`; the OSC 52 fallback is explicitly unconfirmed because terminal and multiplexer policy can reject it. Pressing `y` while the selected preview is empty reports `Nothing to copy` and sends nothing.
 
+Copying runs asynchronously so it never blocks editing or quitting. Each backend is given two seconds; a command that overruns is terminated and the next backend is tried, and the OSC 52 fallback is still sent if none succeed. Only one copy runs at a time, and `y` during a copy reports that one is already in progress. Quitting cancels any pending copy, and a cancelled copy never writes a status line or terminal sequence afterwards.
+
 The delete operators (`x`, `D`, `dd`, and the `d` motions) fill the same register that `p` and `P` paste, matching Vim's unnamed register.
 
 Kanji conversion is dictionary-ranked segmentation, not Mozc or a contextual IME. Readings with multiple valid spellings can therefore produce an unintended result; select a kana row when exactness matters.
@@ -103,6 +105,12 @@ Jinen is an optional local prediction backend for the Kanji row. The available G
 Models are not bundled. Jinen runs through node-llama-cpp/llama.cpp, CPU-only, deterministically and locally. The bundled dictionary is the default and deterministic fallback: it works offline, and a Jinen load, inference, or invalid-output failure leaves the exact dictionary result in place.
 
 Jinen models are used only after they have been explicitly enabled in Settings. If a selected model is not installed, Settings shows its size and asks for confirmation. Choose **Download** to begin; choosing **Cancel** or leaving the prompt does not download anything. Network access for a model occurs only after that explicit confirmation. After download, the model is stored under `$XDG_DATA_HOME/jpn-tui/models`; when `XDG_DATA_HOME` is unset, the default is `~/.local/share/jpn-tui/models`.
+
+Model files are pinned to immutable Hugging Face revisions and recorded with their SHA-256. Downloads are hashed as they stream and installed atomically only when both the size and the checksum match; anything larger than expected is rejected before writing, and a failed or cancelled download removes its partial file. An existing model is verified locally against its size and SHA-256 before it is activated or first loaded, and a missing or corrupt file is treated as not installed so the download confirmation is offered again. No verification step performs network access.
+
+A download that stops producing data for 30 seconds is aborted. While a download is running, press `Esc` to cancel it and return to engine selection; quitting also aborts any download in progress, and late progress or completion callbacks are ignored.
+
+AI prediction follows the input: editing the buffer, changing the engine, or quitting cancels the in-flight request, and at most one generation runs per model with a single latest request waiting behind it. A cancelled or superseded request never changes the preview, and the dictionary result stays in place whenever a prediction fails.
 
 ## Offline use and dictionary rebuild
 

@@ -6,8 +6,13 @@ export interface PredictionInput {
   readonly context?: string;
 }
 
+/** Control channel for one prediction request; input stays pure data. */
+export interface PredictionOptions {
+  readonly signal?: AbortSignal;
+}
+
 /** Model-independent kana-kanji prediction boundary. */
 export interface PredictionEngine {
   readonly id: string;
-  predict(input: PredictionInput): Promise<string>;
+  predict(input: PredictionInput, options?: PredictionOptions): Promise<string>;
 }

@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { release as osRelease } from "node:os";
 
 export type ClipboardBackend =
@@ -12,27 +12,42 @@ export interface NativeClipboardResult {
   readonly backend: ClipboardBackend;
 }
 
-export type ClipboardCopy = (value: string) => NativeClipboardResult | null;
+export type ClipboardCopy = (
+  value: string,
+  signal?: AbortSignal,
+) => Promise<NativeClipboardResult | null>;
 
 export interface ClipboardSpawnOptions {
   readonly input: string;
-  readonly encoding: "utf8";
   readonly shell: false;
   readonly stdio: ["pipe", "ignore", "ignore"];
 }
 
-export type ClipboardSpawnSync = (
+/** Minimal child-process view so the backend order can be tested directly. */
+export interface ClipboardProcess {
+  /** Settles with the exit status, or rejects when the command cannot start. */
+  readonly exited: Promise<number | null>;
+  /** Terminate after a timeout or cancellation. Best effort, never throws. */
+  kill(): void;
+}
+
+export type ClipboardSpawn = (
   command: string,
   args: readonly string[],
   options: ClipboardSpawnOptions,
-) => { readonly status: number | null };
+) => ClipboardProcess;
 
 export interface NativeClipboardOptions {
   readonly platform?: NodeJS.Platform;
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly release?: string;
-  readonly spawn?: ClipboardSpawnSync;
+  readonly spawn?: ClipboardSpawn;
+  readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
 }
+
+/** A hung clipboard command must not stall the composer indefinitely. */
+export const CLIPBOARD_TIMEOUT_MS = 2_000;
 
 interface ClipboardCandidate {
   readonly backend: ClipboardBackend;
@@ -40,8 +55,27 @@ interface ClipboardCandidate {
   readonly args: readonly string[];
 }
 
-const runClipboardCommand: ClipboardSpawnSync = (command, args, options) =>
-  spawnSync(command, args, options);
+const runClipboardCommand: ClipboardSpawn = (command, args, options) => {
+  const child = spawn(command, args, {
+    shell: options.shell,
+    stdio: [...options.stdio],
+  });
+  child.stdin?.end(options.input);
+  const exited = new Promise<number | null>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code) => resolve(code));
+  });
+  return {
+    exited,
+    kill: () => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // The process may have already exited.
+      }
+    },
+  };
+};
 
 function isWsl(
   env: Readonly<Record<string, string | undefined>>,
@@ -91,28 +125,90 @@ function clipboardCandidates(
   return candidates;
 }
 
-/** Copy through the first available OS clipboard command, without invoking a shell. */
-export function copyToNativeClipboard(
+type CandidateOutcome = "copied" | "failed" | "aborted";
+
+async function tryCandidate(
+  candidate: ClipboardCandidate,
+  value: string,
+  spawnCommand: ClipboardSpawn,
+  timeoutMs: number,
+  signal: AbortSignal | undefined,
+): Promise<CandidateOutcome> {
+  if (signal?.aborted) return "aborted";
+
+  let child: ClipboardProcess;
+  try {
+    child = spawnCommand(candidate.command, candidate.args, {
+      input: value,
+      shell: false,
+      stdio: ["pipe", "ignore", "ignore"],
+    });
+  } catch {
+    // Missing or broken clipboard commands are expected; try the next one.
+    return "failed";
+  }
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  const timeout = new Promise<CandidateOutcome>((resolve) => {
+    timer = setTimeout(() => {
+      child.kill();
+      resolve("failed");
+    }, timeoutMs);
+    timer.unref?.();
+  });
+  const aborted = new Promise<CandidateOutcome>((resolve) => {
+    if (!signal) return;
+    onAbort = () => {
+      child.kill();
+      resolve("aborted");
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+
+  try {
+    return await Promise.race([
+      child.exited.then(
+        (code): CandidateOutcome => (code === 0 ? "copied" : "failed"),
+      ),
+      timeout,
+      aborted,
+    ]);
+  } catch {
+    return "failed";
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    if (onAbort && signal) signal.removeEventListener("abort", onAbort);
+  }
+}
+
+/**
+ * Copy through the first available OS clipboard command, without invoking a
+ * shell. A backend that hangs past `timeoutMs` is terminated and the next
+ * candidate is tried, so the caller never blocks on a wedged command.
+ */
+export async function copyToNativeClipboard(
   value: string,
   options: NativeClipboardOptions = {},
-): NativeClipboardResult | null {
+): Promise<NativeClipboardResult | null> {
   const platform = options.platform ?? process.platform;
   const env = options.env ?? process.env;
   const release = options.release ?? osRelease();
-  const spawn = options.spawn ?? runClipboardCommand;
+  const spawnCommand = options.spawn ?? runClipboardCommand;
+  const timeoutMs = options.timeoutMs ?? CLIPBOARD_TIMEOUT_MS;
+  const signal = options.signal;
 
   for (const candidate of clipboardCandidates(platform, env, release)) {
-    try {
-      const result = spawn(candidate.command, candidate.args, {
-        input: value,
-        encoding: "utf8",
-        shell: false,
-        stdio: ["pipe", "ignore", "ignore"],
-      });
-      if (result.status === 0) return { backend: candidate.backend };
-    } catch {
-      // Missing or broken clipboard commands are expected; try the next one.
-    }
+    if (signal?.aborted) return null;
+    const outcome = await tryCandidate(
+      candidate,
+      value,
+      spawnCommand,
+      timeoutMs,
+      signal,
+    );
+    if (outcome === "copied") return { backend: candidate.backend };
+    if (outcome === "aborted") return null;
   }
 
   return null;
