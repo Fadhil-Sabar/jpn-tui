@@ -24,6 +24,7 @@ import {
   JINEN_INPUT_MARKER,
   JINEN_MAX_CONTEXT,
   JINEN_OUTPUT_MARKER,
+  JINEN_WORD_BOUNDARY_MARKER,
   type JinenGenerationOptions,
   type JinenModelHandle,
   JinenPredictionEngine,
@@ -139,6 +140,11 @@ describe("Jinen prompts and deterministic runtime", () => {
     expect(isValidJinenOutput("漢字")).toBe(true);
     expect(isValidJinenOutput(" ")).toBe(false);
     expect(isValidJinenOutput("123")).toBe(false);
+    // A surviving sentencepiece boundary marker means the reading contained
+    // whitespace, so the conversion cannot be trusted.
+    expect(
+      isValidJinenOutput(`これは${JINEN_WORD_BOUNDARY_MARKER}わたしの宿題`),
+    ).toBe(false);
     const success: PredictionEngine = {
       id: "success",
       predict: async () => "成功",

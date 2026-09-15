@@ -4,6 +4,7 @@ import {
   convert,
   segmentReading,
   toJinenReading,
+  upgradeKanaSpans,
 } from "../src/converter";
 import type { DictionaryEntry, DictionaryReader } from "../src/dictionary";
 
@@ -73,6 +74,26 @@ describe("romaji conversion", () => {
     );
     expect(toJinenReading("fadhil")).toBe("fadhil");
     expect(toJinenReading("hello")).toBe("hello");
+  });
+
+  test("strips whitespace so Jinen never sees a sentencepiece boundary", () => {
+    // Jinen's tokenizer renders a space as its boundary marker (`▁`) in the
+    // output, which also corrupts the particles next to it. A reading that
+    // receives the marker is a malformed input, never a real space.
+    const spaced = [
+      "konbanha sensei, kore wa watashi no shukudai",
+      "わたし の しゅくだい",
+      " コンバンハ",
+      "watashi  wa",
+    ];
+    expect(toJinenReading("konbanha sensei, kore wa watashi no shukudai")).toBe(
+      "コンバンハセンセイ,コレハワタシノシュクダイ",
+    );
+    expect(toJinenReading("わたし の しゅくだい")).toBe("ワタシノシュクダイ");
+    expect(toJinenReading(" コンバンハ")).toBe("コンバンハ");
+    for (const value of spaced) {
+      expect(toJinenReading(value)).not.toMatch(/\s/u);
+    }
   });
 
   test("handles romaji edge cases deterministically", () => {
@@ -234,6 +255,55 @@ describe("dictionary-assisted segmentation", () => {
     ]);
 
     expect(result("watashi wa gakusei desu", dictionary).kanji).toBe(
+      "私は学生です",
+    );
+  });
+});
+
+describe("dictionary upgrade of prediction kana", () => {
+  const dictionary = fixture([
+    entry("わたし", "私", 100),
+    entry("これ", "これ", 50, true),
+    entry("は", "歯", 10),
+    entry("の", "野", 10),
+    entry("です", "です", 20, true),
+    entry("べる", "弁る", 10),
+    entry("きたい", "期待", 10),
+    entry("し", "死", 10),
+    entry("ま", "間", 10),
+    entry("す", "酢", 10),
+  ]);
+
+  test("restores the kanji a prediction left as hiragana", () => {
+    expect(upgradeKanaSpans("わたしはファディルです", dictionary)).toBe(
+      "私はファディルです",
+    );
+    expect(upgradeKanaSpans("これはわたしの", dictionary)).toBe("これは私の");
+  });
+
+  test("keeps a lone kana, which is a particle and not a word", () => {
+    expect(upgradeKanaSpans("は", dictionary)).toBe("は");
+    expect(upgradeKanaSpans("の", dictionary)).toBe("の");
+  });
+
+  test("leaves a word the dictionary usually writes in kana", () => {
+    expect(upgradeKanaSpans("これは", dictionary)).toBe("これは");
+    expect(upgradeKanaSpans("です", dictionary)).toBe("です");
+  });
+
+  test("never swallows okurigana next to a kanji", () => {
+    expect(upgradeKanaSpans("食べる", dictionary)).toBe("食べる");
+    expect(upgradeKanaSpans("行きたい", dictionary)).toBe("行きたい");
+  });
+
+  test("refuses a run it cannot cover without fragmenting it", () => {
+    // `し`+`ま`+`す` would need three lone kana, which are never words here.
+    expect(upgradeKanaSpans("します", dictionary)).toBe("します");
+    expect(upgradeKanaSpans("きょう", dictionary)).toBe("きょう");
+  });
+
+  test("upgrades the run beside a kanji when its edge stays kana", () => {
+    expect(upgradeKanaSpans("わたしは学生です", dictionary)).toBe(
       "私は学生です",
     );
   });

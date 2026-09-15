@@ -29,7 +29,12 @@ import {
   type PredictionConfig,
   savePredictionConfig,
 } from "./config";
-import { type ConversionResult, convert, toJinenReading } from "./converter";
+import {
+  type ConversionResult,
+  convert,
+  toJinenReading,
+  upgradeKanaSpans,
+} from "./converter";
 import {
   closeDefaultDictionary,
   DictionaryError,
@@ -464,9 +469,12 @@ export class TuiSession {
       return;
     }
     // Never replace the deterministic kana rows; only the Kanji preview is
-    // owned by asynchronous prediction.
+    // owned by asynchronous prediction. A valid prediction is upgraded with
+    // the dictionary so it cannot under-convert below the deterministic row.
     const valid = isValidJinenOutput(generated);
-    const result = valid ? generated : fallback;
+    const result = valid
+      ? upgradeKanaSpans(generated, getDictionary())
+      : fallback;
     this.preview = { ...this.basePreview, kanji: result };
     this.prediction = valid
       ? { phase: "generated", input, result }

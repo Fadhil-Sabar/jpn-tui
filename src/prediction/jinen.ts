@@ -7,6 +7,12 @@ export const JINEN_MAX_TOKENS = 256;
 export const JINEN_INPUT_MARKER = "\uEE00";
 export const JINEN_OUTPUT_MARKER = "\uEE01";
 export const JINEN_CONTEXT_MARKER = "\uEE02";
+/**
+ * SentencePiece's word-boundary marker. It is emitted as literal text when a
+ * reading contains whitespace, so a surviving marker means the input was
+ * malformed and the result cannot be trusted.
+ */
+export const JINEN_WORD_BOUNDARY_MARKER = "\u2581";
 
 export interface JinenGenerationOptions {
   readonly maxTokens: number;
@@ -57,6 +63,7 @@ function outputText(value: unknown): string | undefined {
     output.includes(JINEN_INPUT_MARKER) ||
     output.includes(JINEN_OUTPUT_MARKER) ||
     output.includes(JINEN_CONTEXT_MARKER) ||
+    output.includes(JINEN_WORD_BOUNDARY_MARKER) ||
     /[\p{Cc}\p{Cs}]/u.test(output) ||
     /[A-Za-z]/u.test(output) ||
     !/[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/u.test(output)

@@ -18,6 +18,8 @@ export interface ConverterOptions {
 const asciiLetter = /^[A-Za-z]$/;
 const whitespace = /^\s$/u;
 const kana = /^[\u3040-\u309f\u30a0-\u30ffー]$/u;
+const hiragana = /^[\u3041-\u309f]$/u;
+const han = /^\p{Script=Han}$/u;
 const apostrophe = /^[\u0027\u2019]$/u;
 const asciiResidue = /[A-Za-z]/u;
 const PARTICLES: ReadonlyMap<string, string> = new Map([
@@ -339,11 +341,15 @@ export function toJinenReading(
 ): string {
   if (value.length === 0) return "";
   const dictionary = dictionaryFromOptions(options);
-  return toKatakanaPreservingPunctuation(
-    // Keep the written particle form (`wa` → `ハ`) expected by Jinen while
-    // reusing the contextual unknown-name fallback from Kanji preparation.
-    prepareReading(value, true, dictionary, true).reading,
-  );
+  // Keep the written particle form (`wa` → `ハ`) expected by Jinen while
+  // reusing the contextual unknown-name fallback from Kanji preparation.
+  const reading = prepareReading(value, true, dictionary, true).reading;
+  // A reading never contains whitespace. Jinen's SentencePiece tokenizer
+  // treats a space as a word boundary and emits that boundary marker (`▁`)
+  // as literal text, which also derails nearby particles. Spaces survive
+  // preparation whenever a run is not flanked by two convertible words (for
+  // example after punctuation, or between typed kana), so drop them here.
+  return toKatakanaPreservingPunctuation(reading).replace(/\s+/gu, "");
 }
 
 function isKana(value: string): boolean {
@@ -547,6 +553,113 @@ export function segmentReading(
   }
 
   return routes[0]?.output ?? reading;
+}
+
+/**
+ * Split one hiragana run into dictionary words, keeping particles in kana.
+ *
+ * Every character must be accounted for, and a lone kana is never a word: the
+ * dictionary resolves those to unrelated kanji (`は` becomes `歯`) and a real
+ * one-kana word is written in kana anyway. That is what separates a phrase
+ * worth converting (`これはわたしの` becomes `これは私の`) from a verb ending
+ * the dictionary can only chew into fragments (`します` becomes `しま酢`).
+ * Returns undefined when the run cannot be covered this way.
+ */
+function segmentHiraganaRun(
+  run: string,
+  dictionary: DictionaryReader,
+): string[] | undefined {
+  const parts = Array.from(run);
+  const maximum = Math.max(1, dictionary.maxReadingLength ?? 32);
+  const unreachable = Number.POSITIVE_INFINITY;
+  const cost = new Array<number>(parts.length + 1).fill(unreachable);
+  const choice: Array<{ form: string; stop: number } | undefined> = new Array(
+    parts.length + 1,
+  );
+  cost[parts.length] = 0;
+
+  for (let index = parts.length - 1; index >= 0; index -= 1) {
+    const end = Math.min(parts.length, index + maximum);
+    for (let stop = index + 1; stop <= end; stop += 1) {
+      const tail = cost[stop];
+      if (tail === unreachable) continue;
+      const spelling = parts.slice(index, stop).join("");
+      if (PARTICLE_READINGS.includes(spelling)) {
+        if (tail < cost[index]) {
+          cost[index] = tail;
+          choice[index] = { form: spelling, stop };
+        }
+        continue;
+      }
+      if (stop - index < 2) continue;
+      // Rank orders entries by how ordinary they are, so the cheapest cover
+      // picks `この`+`こと` over a rare word that happens to be longer.
+      const [best] = [...dictionary.lookup(spelling)].sort(compareEntries);
+      if (best === undefined) continue;
+      const total = best.rank + tail;
+      if (total < cost[index]) {
+        cost[index] = total;
+        choice[index] = { form: best.form, stop };
+      }
+    }
+  }
+
+  if (cost[0] === unreachable) return undefined;
+  const segments: string[] = [];
+  for (let index = 0; index < parts.length; ) {
+    const picked = choice[index];
+    if (picked === undefined) return undefined;
+    segments.push(picked.form);
+    index = picked.stop;
+  }
+  return segments;
+}
+
+/**
+ * Restore kanji that a prediction left as hiragana.
+ *
+ * Jinen sometimes returns a natural but unconverted spelling (`わたし`), which
+ * makes the Kanji row read like the kana rows. Each maximal hiragana run is
+ * re-segmented against the dictionary; a run touching a kanji is okurigana or
+ * a prefix and is only replaced when the kana against that kanji survive, as
+ * the particle in `わたしは学生` does and the ending of `行きたい` does not.
+ */
+export function upgradeKanaSpans(
+  value: string,
+  dictionary: DictionaryReader,
+): string {
+  const characters = Array.from(value);
+  const parts: string[] = [];
+  let index = 0;
+
+  while (index < characters.length) {
+    if (!hiragana.test(characters[index])) {
+      parts.push(characters[index]);
+      index += 1;
+      continue;
+    }
+    const start = index;
+    while (index < characters.length && hiragana.test(characters[index])) {
+      index += 1;
+    }
+    const run = characters.slice(start, index).join("");
+    const segments = segmentHiraganaRun(run, dictionary);
+    if (segments === undefined) {
+      parts.push(run);
+      continue;
+    }
+    const upgraded = Array.from(segments.join(""));
+    const swallowsKanji =
+      (start > 0 &&
+        han.test(characters[start - 1]) &&
+        han.test(upgraded[0] ?? "")) ||
+      (index < characters.length &&
+        han.test(characters[index]) &&
+        han.test(upgraded[upgraded.length - 1] ?? ""));
+    parts.push(swallowsKanji ? run : segments.join(""));
+  }
+
+  return parts.join("");
 }
 
 function dictionaryFromOptions(
