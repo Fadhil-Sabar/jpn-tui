@@ -27,6 +27,8 @@ jpn
 
 `Enter` and `Ctrl-C` work in both modes: `Enter` accepts the selected preview; `Ctrl-C` exits with status 130.
 
+The composer footer shows only the bindings that work in the current mode, so it stays readable at the minimum terminal size. Press `?` for the full keymap; `Esc` or `?` closes it.
+
 ### Normal mode
 
 | Key | Action |
@@ -39,11 +41,16 @@ jpn
 | `x` | Delete the grapheme under the cursor |
 | `D` | Delete from the cursor to the end |
 | `dd` | Delete the whole input |
+| `dw`, `de`, `db` | Delete to the next word, word end, or word start |
+| `d$`, `d0` | Delete to the end or start of the input |
+| `dh`, `dl` | Delete the grapheme before or under the cursor |
+| `p`, `P` | Paste the register after or before the cursor |
 | `u`, `Ctrl-R` | Undo or redo |
 | `j`, `k` | Select the next or previous preview |
 | `Tab`, `Shift-Tab` | Cycle previews forward or backward |
 | `1`, `2`, `3` | Select hiragana, katakana, or kanji |
 | `y` | Copy the selected preview (native clipboard first, OSC 52 fallback) |
+| `?` | Open the keymap (`Esc` or `?` closes it) |
 | `s` | Open Settings |
 | `q` | Quit without output |
 
@@ -68,6 +75,8 @@ The three rows update while editing:
 2. **カタカナ** renders that reading in katakana.
 3. **漢字** uses the bundled JMdict-derived dictionary to choose a best-effort spelling.
 
+Rows are clipped to the terminal width; a row that does not fit ends with `…`. While a `d` sequence is open, the mode line shows the waiting operator, for example `NORMAL  -- d --  Input`.
+
 Examples:
 
 | Input | Hiragana | Katakana | Kanji |
@@ -78,7 +87,9 @@ Examples:
 
 `Enter` restores the terminal and writes only the selected value plus a newline to standard output, so it can be captured or redirected. `y` copies without exiting. It first tries the platform clipboard command: `wl-copy` on Linux Wayland, `xclip` then `xsel` on Linux X11 (including XFCE), `pbcopy` on macOS, or `clip.exe` on Windows and WSL. These commands are optional and no shell is involved.
 
-If no applicable native command succeeds, `jpn` sends the existing OSC 52 sequence for SSH, minimal systems, and compatible terminals. The status line identifies a successful native backend; the OSC 52 fallback is explicitly unconfirmed because terminal and multiplexer policy can reject it.
+If no applicable native command succeeds, `jpn` sends the existing OSC 52 sequence for SSH, minimal systems, and compatible terminals. The status line names the copied row and echoes a shortened value, for example `Copied 漢字: 日本語 via wl-copy`; the OSC 52 fallback is explicitly unconfirmed because terminal and multiplexer policy can reject it. Pressing `y` while the selected preview is empty reports `Nothing to copy` and sends nothing.
+
+The delete operators (`x`, `D`, `dd`, and the `d` motions) fill the same register that `p` and `P` paste, matching Vim's unnamed register.
 
 Kanji conversion is dictionary-ranked segmentation, not Mozc or a contextual IME. Readings with multiple valid spellings can therefore produce an unintended result; select a kana row when exactness matters.
 

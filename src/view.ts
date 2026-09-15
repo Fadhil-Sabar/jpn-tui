@@ -30,7 +30,8 @@ export type ScreenName =
   | "composer"
   | "settings"
   | "prediction-engine"
-  | "model-download";
+  | "model-download"
+  | "help";
 
 export interface ScreenView {
   readonly screen: ScreenName;
@@ -63,11 +64,16 @@ export interface ModelDownloadView extends ScreenView {
   readonly backend: Exclude<PredictionBackend, "dictionary">;
 }
 
+export interface HelpView extends ScreenView {
+  readonly screen: "help";
+}
+
 export type TuiView =
   | ComposerView
   | SettingsView
   | PredictionEngineView
-  | ModelDownloadView;
+  | ModelDownloadView
+  | HelpView;
 
 export interface ViewOptions {
   readonly status?: string | null;
@@ -97,7 +103,20 @@ export interface ScreenViewOptions {
   readonly status?: string | null;
 }
 
-const labels = ["ひらがな", "カタカナ", "漢字"] as const;
+export const PREVIEW_LABELS = ["ひらがな", "カタカナ", "漢字"] as const;
+
+/**
+ * Footer hints are mode-specific because most bindings are inert while
+ * inserting. Keep each line under the minimum terminal width.
+ */
+export const NORMAL_FOOTER =
+  "i edit · j/k pick · Enter accept · y copy · ? help";
+export const INSERT_FOOTER =
+  "Esc normal · Enter accept · Ctrl-W word · Ctrl-U clear";
+
+export function footerFor(mode: ComposerState["mode"]): string {
+  return mode === "INSERT" ? INSERT_FOOTER : NORMAL_FOOTER;
+}
 
 function isWideCodePoint(codePoint: number): boolean {
   return (
@@ -143,6 +162,14 @@ function clipText(value: string, columns: number): string {
     used += width;
   }
   return result;
+}
+
+/** Clip to `columns`, substituting a trailing ellipsis when text is dropped. */
+export function clipWithEllipsis(value: string, columns: number): string {
+  if (columns <= 0) return "";
+  if (displayWidth(value) <= columns) return value;
+  if (columns === 1) return "…";
+  return `${clipText(value, columns - 1)}…`;
 }
 
 function clipSpans(spans: readonly ViewSpan[], columns: number): ViewSpan[] {
@@ -278,7 +305,13 @@ export function renderView(
   }
 
   const margin = 2;
-  const modePrefix = `${state.mode}  Input  `;
+  const pendingMarker =
+    state.mode === "NORMAL" && state.pending !== null
+      ? `-- ${state.pending} --`
+      : "";
+  const modePrefix = pendingMarker
+    ? `${state.mode}  ${pendingMarker}  Input  `
+    : `${state.mode}  Input  `;
   const inputColumns = Math.max(
     1,
     safeWidth - margin * 2 - displayWidth(modePrefix),
@@ -298,6 +331,12 @@ export function renderView(
     ]),
     line(margin, 3, safeWidth, [
       { text: state.mode, tone: "accent" },
+      ...(pendingMarker
+        ? ([
+            { text: "  ", tone: "muted" },
+            { text: pendingMarker, tone: "accent" },
+          ] as const)
+        : []),
       { text: "  Input  ", tone: "muted" },
       { text: input.text, tone: "neutral" },
     ]),
@@ -306,15 +345,21 @@ export function renderView(
   const values = rowValues(preview);
   for (let index = 0; index < values.length; index += 1) {
     const focused = state.focus === index;
+    const rowLabel = `${index + 1} ${PREVIEW_LABELS[index]}`;
+    const prefix = `${focused ? "› " : "  "}${rowLabel}  `;
+    const valueColumns = Math.max(0, safeWidth - margin - displayWidth(prefix));
     lines.push(
       line(margin, 6 + index * 2, safeWidth, [
         { text: focused ? "› " : "  ", tone: focused ? "accent" : "muted" },
         {
-          text: `${index + 1} ${labels[index]}`,
+          text: rowLabel,
           tone: focused ? "accent" : "muted",
         },
         { text: "  ", tone: "muted" },
-        { text: values[index] || "—", tone: "neutral" },
+        {
+          text: clipWithEllipsis(values[index] || "—", valueColumns),
+          tone: "neutral",
+        },
       ]),
     );
   }
@@ -351,16 +396,13 @@ export function renderView(
   } else if (options.status) {
     lines.push(
       line(margin, safeHeight - 3, safeWidth, [
-        { text: options.status, tone: "accent" },
+        { text: safeStatusText(options.status), tone: "accent" },
       ]),
     );
   }
   lines.push(
     line(margin, safeHeight - 2, safeWidth, [
-      {
-        text: "i/a edit · Esc normal · s settings · j/k/Tab focus · 1/2/3 select · Enter choose · y copy · q quit",
-        tone: "muted",
-      },
+      { text: footerFor(state.mode), tone: "muted" },
     ]),
   );
 
@@ -644,6 +686,73 @@ export function renderModelDownloadView(
     tooSmall: false,
     selectedButton,
     backend,
+    lines,
+    cursor: { x: 0, y: 0, visible: false, style: "block" },
+  };
+}
+
+/** Static keymap overlay reached with `?` from the composer. */
+const HELP_ROWS: ReadonlyArray<readonly [string, string]> = [
+  ["move", "h l 0 $ w b e"],
+  ["insert", "i a I A"],
+  ["delete", "x D dd"],
+  ["delete word", "dw de db d$ d0"],
+  ["paste", "p P"],
+  ["undo / redo", "u Ctrl-R"],
+  ["preview", "j k Tab 1 2 3"],
+  ["actions", "y copy · Enter accept · s settings · q quit"],
+  ["insert mode", "Esc normal · Ctrl-W word · Ctrl-U clear"],
+];
+
+/** Render the full keymap without depending on OpenTUI or a terminal. */
+export function renderHelpView(
+  width: number,
+  height: number,
+  options: ScreenViewOptions = {},
+): HelpView {
+  const dimensions = safeDimensions(width, height);
+  if (
+    dimensions.width < MIN_TERMINAL_WIDTH ||
+    dimensions.height < MIN_TERMINAL_HEIGHT
+  ) {
+    return {
+      screen: "help",
+      ...dimensions,
+      tooSmall: true,
+      ...smallScreenLines(dimensions.width, dimensions.height),
+    };
+  }
+
+  const margin = 2;
+  const labelWidth =
+    Math.max(...HELP_ROWS.map(([label]) => displayWidth(label))) + 2;
+  const lines: ViewLine[] = [
+    line(margin, 1, dimensions.width, [{ text: "Help", tone: "accent" }]),
+  ];
+  HELP_ROWS.forEach(([label, keys], index) => {
+    lines.push(
+      line(margin, 3 + index, dimensions.width, [
+        { text: label.padEnd(labelWidth), tone: "muted" },
+        { text: keys, tone: "neutral" },
+      ]),
+    );
+  });
+  if (options.status) {
+    lines.push(
+      line(margin, dimensions.height - 3, dimensions.width, [
+        { text: safeStatusText(options.status), tone: "accent" },
+      ]),
+    );
+  }
+  lines.push(
+    line(margin, dimensions.height - 2, dimensions.width, [
+      { text: "Esc close", tone: "muted" },
+    ]),
+  );
+  return {
+    screen: "help",
+    ...dimensions,
+    tooSmall: false,
     lines,
     cursor: { x: 0, y: 0, visible: false, style: "block" },
   };

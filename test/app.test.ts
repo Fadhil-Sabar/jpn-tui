@@ -70,6 +70,7 @@ describe("OpenTUI adapter", () => {
       type: "yank",
       value: "字:nihon",
       sequence: osc52Sequence("字:nihon"),
+      focus: 2,
     });
   });
 
@@ -187,7 +188,83 @@ describe("completion and session effects", () => {
     session.key({ name: "y", sequence: "y" });
     expect(copied).toEqual(["ひ:nihon"]);
     expect(terminal).toEqual([]);
-    expect(rendered).toContain("Copied via xclip");
+    expect(rendered).toContain("Copied ひらがな: ひ:nihon via xclip");
+    completion.finish({ type: "quit" });
+  });
+
+  test("y reports the focused row label and clipboard backend", () => {
+    const terminal: string[] = [];
+    const completion = new Completion(memoryStream(), memoryStream());
+    let rendered = "";
+    const session = new TuiSession({
+      completion,
+      terminal: memoryStream(terminal),
+      convert: converted,
+      copyToClipboard: () => ({ backend: "wl-copy" }),
+      statusDurationMs: 60_000,
+      render: (view) => {
+        rendered = view.lines
+          .flatMap((line) => line.spans.map((span) => span.text))
+          .join("");
+      },
+    });
+    session.key({ name: "i", sequence: "i" });
+    session.paste("nihon");
+    session.key({ name: "escape", sequence: "\x1b" });
+    session.key({ name: "3", sequence: "3" });
+    session.key({ name: "y", sequence: "y" });
+    expect(rendered).toContain("Copied 漢字: 字:nihon via wl-copy");
+    completion.finish({ type: "quit" });
+  });
+
+  test("y on an empty preview reports nothing to copy and sends nothing", () => {
+    const terminal: string[] = [];
+    const completion = new Completion(memoryStream(), memoryStream());
+    let rendered = "";
+    let copyCalls = 0;
+    const session = new TuiSession({
+      completion,
+      terminal: memoryStream(terminal),
+      convert: converted,
+      copyToClipboard: () => {
+        copyCalls += 1;
+        return { backend: "xclip" };
+      },
+      statusDurationMs: 60_000,
+      render: (view) => {
+        rendered = view.lines
+          .flatMap((line) => line.spans.map((span) => span.text))
+          .join("");
+      },
+    });
+    session.key({ name: "y", sequence: "y" });
+    expect(copyCalls).toBe(0);
+    expect(terminal).toEqual([]);
+    expect(rendered).toContain("Nothing to copy — preview is empty");
+    completion.finish({ type: "quit" });
+  });
+
+  test("a truncated preview value is summarized with an ellipsis", () => {
+    const completion = new Completion(memoryStream(), memoryStream());
+    let rendered = "";
+    const long = "a".repeat(40);
+    const session = new TuiSession({
+      completion,
+      terminal: memoryStream(),
+      convert: () => ({ hiragana: long, katakana: "", kanji: "" }),
+      copyToClipboard: () => ({ backend: "xclip" }),
+      statusDurationMs: 60_000,
+      render: (view) => {
+        rendered = view.lines
+          .flatMap((line) => line.spans.map((span) => span.text))
+          .join("");
+      },
+    });
+    session.key({ name: "i", sequence: "i" });
+    session.paste("a");
+    session.key({ name: "escape", sequence: "\x1b" });
+    session.key({ name: "y", sequence: "y" });
+    expect(rendered).toContain(`Copied ひらがな: ${"a".repeat(19)}… via xclip`);
     completion.finish({ type: "quit" });
   });
 
@@ -212,9 +289,7 @@ describe("completion and session effects", () => {
     session.key({ name: "escape", sequence: "\x1b" });
     session.key({ name: "y", sequence: "y" });
     expect(terminal).toEqual([osc52Sequence("ひ:nihon")]);
-    expect(rendered).toContain(
-      "OSC 52 fallback sent (clipboard change unconfirmed)",
-    );
+    expect(rendered).toContain("OSC 52 fallback sent: ひ:nihon (unconfirmed)");
     expect(rendered).not.toContain("Copied via");
     completion.finish({ type: "quit" });
   });

@@ -335,6 +335,50 @@ function cursorForUtf16Offset(value: string, offset: number): number {
   return cursor;
 }
 
+function deleteRange(
+  state: ComposerState,
+  start: number,
+  end: number,
+  cursor: number,
+): ComposerState {
+  const parts = graphemes(state.buffer);
+  const count = parts.length;
+  const safeStart = Math.max(0, Math.min(start, count));
+  const safeEnd = Math.max(safeStart, Math.min(end, count));
+  if (safeStart >= safeEnd) return { ...state, pending: null };
+  const yanked = parts.slice(safeStart, safeEnd).join("");
+  const next = recordEdit(
+    state,
+    [...parts.slice(0, safeStart), ...parts.slice(safeEnd)].join(""),
+    cursor,
+  );
+  return yanked.length > 0 ? { ...next, yank: yanked } : next;
+}
+
+function pasteYank(state: ComposerState, before: boolean): ComposerState {
+  const yank = state.yank;
+  if (!yank) return { ...state, pending: null };
+  const yankParts = graphemes(yank);
+  if (yankParts.length === 0) return { ...state, pending: null };
+  const parts = graphemes(state.buffer);
+  const position =
+    parts.length === 0
+      ? 0
+      : before
+        ? Math.max(0, Math.min(state.cursor, parts.length))
+        : Math.max(0, Math.min(state.cursor + 1, parts.length));
+  const next = [
+    ...parts.slice(0, position),
+    ...yankParts,
+    ...parts.slice(position),
+  ].join("");
+  return recordEdit(
+    state,
+    next,
+    normalCursor(position + yankParts.length - 1, graphemeLength(next)),
+  );
+}
+
 function insertText(state: ComposerState, value: string): ComposerState {
   const parts = graphemes(state.buffer);
   const prefix = parts.slice(0, state.cursor).join("");
@@ -407,13 +451,68 @@ function normalKey(state: ComposerState, key: string): ComposerResult {
   // continuation is consumed, rather than accidentally becoming another
   // command, which makes the sequence deterministic.
   if (state.pending === "d") {
-    if (key === "d") {
-      return {
-        state: replaceRange(state, 0, graphemeLength(state.buffer), 0),
-        effects: [],
-      };
+    const parts = graphemes(state.buffer);
+    const count = parts.length;
+    switch (key) {
+      case "d":
+        return { state: deleteRange(state, 0, count, 0), effects: [] };
+      case "w":
+        return {
+          state: deleteRange(
+            state,
+            state.cursor,
+            nextWord(parts, state.cursor),
+            state.cursor,
+          ),
+          effects: [],
+        };
+      case "e":
+        return {
+          state: deleteRange(
+            state,
+            state.cursor,
+            nextWordEnd(parts, state.cursor) + 1,
+            state.cursor,
+          ),
+          effects: [],
+        };
+      case "b": {
+        const start = wordStartBefore(parts, state.cursor);
+        return {
+          state: deleteRange(state, start, state.cursor, start),
+          effects: [],
+        };
+      }
+      case "h":
+        return {
+          state: deleteRange(
+            state,
+            state.cursor - 1,
+            state.cursor,
+            Math.max(0, state.cursor - 1),
+          ),
+          effects: [],
+        };
+      case "l":
+        return {
+          state: deleteRange(
+            state,
+            state.cursor,
+            state.cursor + 1,
+            state.cursor,
+          ),
+          effects: [],
+        };
+      case "$":
+        return {
+          state: deleteRange(state, state.cursor, count, state.cursor),
+          effects: [],
+        };
+      case "0":
+        return { state: deleteRange(state, 0, state.cursor, 0), effects: [] };
+      default:
+        return { state: { ...state, pending: null }, effects: [] };
     }
-    return { state: { ...state, pending: null }, effects: [] };
   }
 
   switch (key) {
@@ -496,7 +595,7 @@ function normalKey(state: ComposerState, key: string): ComposerResult {
       }
       const nextCursor = normalCursor(state.cursor, count - 1);
       return {
-        state: replaceRange(state, state.cursor, state.cursor + 1, nextCursor),
+        state: deleteRange(state, state.cursor, state.cursor + 1, nextCursor),
         effects: [],
       };
     }
@@ -506,10 +605,14 @@ function normalKey(state: ComposerState, key: string): ComposerResult {
         return { state: { ...state, pending: null }, effects: [] };
       }
       return {
-        state: replaceRange(state, state.cursor, count, state.cursor),
+        state: deleteRange(state, state.cursor, count, state.cursor),
         effects: [],
       };
     }
+    case "p":
+      return { state: pasteYank(state, false), effects: [] };
+    case "P":
+      return { state: pasteYank(state, true), effects: [] };
     case "u":
       return { state: undo(state), effects: [] };
     case "Ctrl-R":

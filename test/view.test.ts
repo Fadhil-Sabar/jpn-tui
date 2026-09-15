@@ -3,8 +3,12 @@ import { createInitialState } from "../src/composer";
 import type { ConversionResult } from "../src/converter";
 import {
   displayWidth,
+  footerFor,
+  INSERT_FOOTER,
   MIN_TERMINAL_HEIGHT,
   MIN_TERMINAL_WIDTH,
+  NORMAL_FOOTER,
+  renderHelpView,
   renderModelDownloadView,
   renderPredictionEngineView,
   renderSettingsView,
@@ -41,7 +45,7 @@ describe("view model", () => {
 10|    3 漢字  日本語
 11|
 12|
-13|  i/a edit · Esc normal · s settings · j/k/Tab focus · 1/2/3
+13|  i edit · j/k pick · Enter accept · y copy · ? help
 14|"
 `);
   });
@@ -202,11 +206,109 @@ describe("view model", () => {
   });
 });
 
+describe("mode-aware footer", () => {
+  test("each footer fits inside the minimum terminal width", () => {
+    for (const footer of [NORMAL_FOOTER, INSERT_FOOTER]) {
+      expect(displayWidth(`  ${footer}`)).toBeLessThanOrEqual(
+        MIN_TERMINAL_WIDTH,
+      );
+    }
+  });
+
+  test("INSERT mode shows only insert-mode keys", () => {
+    const state = { ...createInitialState("nihongo"), mode: "INSERT" as const };
+    const text = serializeView(renderView(state, preview, 60, 15));
+    expect(text).toContain(INSERT_FOOTER);
+    expect(text).not.toContain(NORMAL_FOOTER);
+    expect(text).not.toContain("j/k pick");
+  });
+
+  test("NORMAL mode footer is fully visible at the minimum width", () => {
+    const text = serializeView(
+      renderView(createInitialState("nihongo"), preview, 60, 15),
+    );
+    expect(text).toContain(NORMAL_FOOTER);
+    expect(text).toMatch(/help\s*$/m);
+  });
+
+  test("the two footers differ so only live bindings are advertised", () => {
+    expect(footerFor("NORMAL")).toBe(NORMAL_FOOTER);
+    expect(footerFor("INSERT")).toBe(INSERT_FOOTER);
+  });
+});
+
+describe("help overlay", () => {
+  test("lists the bindings that the footer omits", () => {
+    const text = serializeView(renderHelpView(60, 15));
+    expect(text).toContain("Help");
+    for (const fragment of [
+      "h l 0 $ w b e",
+      "i a I A",
+      "x D dd",
+      "dw de db d$ d0",
+      "p P",
+      "u Ctrl-R",
+      "j k Tab 1 2 3",
+      "s settings",
+      "q quit",
+      "Ctrl-W word",
+    ]) {
+      expect(text).toContain(fragment);
+    }
+    expect(text).toContain("Esc close");
+  });
+
+  test("keeps every help row inside the minimum terminal width", () => {
+    const view = renderHelpView(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT);
+    for (const item of view.lines) {
+      const width =
+        item.x +
+        item.spans.reduce((sum, span) => sum + displayWidth(span.text), 0);
+      expect(width).toBeLessThanOrEqual(MIN_TERMINAL_WIDTH);
+    }
+    expect(view.lines.at(-1)?.spans[0]?.text).toBe("Esc close");
+  });
+
+  test("small terminals show only resize guidance", () => {
+    const view = renderHelpView(MIN_TERMINAL_WIDTH - 1, MIN_TERMINAL_HEIGHT);
+    expect(view.tooSmall).toBe(true);
+    expect(serializeView(view)).toContain("Terminal too small");
+  });
+});
+
 describe("terminal display width", () => {
   test("counts Japanese, combining clusters, and emoji", () => {
     expect(displayWidth("abc日本")).toBe(7);
     expect(displayWidth("e\u0301")).toBe(1);
     expect(displayWidth("👩‍💻")).toBe(2);
     expect(displayWidth("\u200d")).toBe(0);
+  });
+});
+
+describe("pending operator and truncation feedback", () => {
+  test("shows the open operator only while a d sequence is pending", () => {
+    const waiting = { ...createInitialState("abc"), pending: "d" as const };
+    expect(serializeView(renderView(waiting, preview, 80, 20))).toContain(
+      "NORMAL  -- d --  Input  abc",
+    );
+    expect(
+      serializeView(renderView(createInitialState("abc"), preview, 80, 20)),
+    ).not.toContain("-- d --");
+  });
+
+  test("marks a truncated preview row with an ellipsis inside the width", () => {
+    const long = { ...preview, kanji: "漢".repeat(60) };
+    const view = renderView(createInitialState("x"), long, 60, 15);
+    const row = view.lines.find((line) => line.y === 10);
+    const text = row?.spans.map((span) => span.text).join("") ?? "";
+    expect(text.endsWith("…")).toBe(true);
+    expect(displayWidth(text)).toBeLessThanOrEqual(60);
+  });
+
+  test("leaves a preview row untouched when it fits", () => {
+    const view = renderView(createInitialState("x"), preview, 80, 20);
+    const row = view.lines.find((line) => line.y === 10);
+    const text = row?.spans.map((span) => span.text).join("") ?? "";
+    expect(text).toBe("  3 漢字  日本語");
   });
 });

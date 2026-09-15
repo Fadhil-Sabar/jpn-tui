@@ -122,6 +122,54 @@ describe("OpenTUI cursor adapter", () => {
   });
 });
 
+describe("help overlay navigation", () => {
+  test("? opens the keymap and Esc returns to the composer", () => {
+    const fixture = makeSession();
+    expect(fixture.session.snapshot.screen).toBe("composer");
+
+    press(fixture.session, "?", "?");
+    expect(fixture.session.snapshot.screen).toBe("help");
+    expect(composerText(fixture.session)).toContain("h l 0 $ w b e");
+
+    press(fixture.session, "escape", "\x1b");
+    expect(fixture.session.snapshot.screen).toBe("composer");
+    fixture.completion.finish({ type: "quit" });
+  });
+
+  test("? toggles the keymap closed", () => {
+    const fixture = makeSession();
+    press(fixture.session, "?", "?");
+    expect(fixture.session.snapshot.screen).toBe("help");
+    press(fixture.session, "?", "?");
+    expect(fixture.session.snapshot.screen).toBe("composer");
+    fixture.completion.finish({ type: "quit" });
+  });
+
+  test("a shifted slash opens the keymap", () => {
+    const fixture = makeSession();
+    fixture.session.key({ name: "/", sequence: "/", shift: true });
+    expect(fixture.session.snapshot.screen).toBe("help");
+    fixture.completion.finish({ type: "quit" });
+  });
+
+  test("? types a literal character in INSERT mode", () => {
+    const fixture = makeSession();
+    press(fixture.session, "i");
+    press(fixture.session, "?", "?");
+    expect(fixture.session.snapshot.screen).toBe("composer");
+    expect(composerText(fixture.session)).toContain("Input  ?");
+    fixture.completion.finish({ type: "quit" });
+  });
+
+  test("? does not open the keymap while an operator is pending", () => {
+    const fixture = makeSession();
+    press(fixture.session, "d");
+    press(fixture.session, "?", "?");
+    expect(fixture.session.snapshot.screen).toBe("composer");
+    fixture.completion.finish({ type: "quit" });
+  });
+});
+
 describe("TuiSession optional prediction", () => {
   test("does not download until explicit confirmation", () => {
     let downloads = 0;

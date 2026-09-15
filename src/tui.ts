@@ -9,6 +9,7 @@ import {
   TextRenderable,
 } from "@opentui/core";
 import {
+  type AdapterAction,
   type AdapterEffect,
   applyAdapterKey,
   applyPaste,
@@ -48,8 +49,11 @@ import {
 } from "./prediction/models";
 import type { PredictionBackend, PredictionInput } from "./prediction/types";
 import {
+  clipWithEllipsis,
   displayWidth,
+  PREVIEW_LABELS,
   type PredictionViewState,
+  renderHelpView,
   renderModelDownloadView,
   renderPredictionEngineView,
   renderSettingsView,
@@ -90,6 +94,11 @@ export interface TuiSessionOptions {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** True when a mapped key event is the `?` help shortcut. */
+function isHelpKey(action: AdapterAction): boolean {
+  return action.key === "?" || (action.key === "/" && action.shift === true);
 }
 
 /** Japanese context before the current whitespace-delimited segment. */
@@ -165,6 +174,9 @@ export class TuiSession {
   }
 
   get snapshot(): TuiView {
+    if (this.screen === "help") {
+      return renderHelpView(this.width, this.height, { status: this.status });
+    }
     if (this.screen === "settings") {
       return renderSettingsView(
         this.backend,
@@ -232,8 +244,8 @@ export class TuiSession {
         this.draw();
         return;
       }
-      // Settings is a session-level screen. In particular, it must not be
-      // added to the composer reducer or change its default focus.
+      // Settings and Help are session-level screens. In particular, they must
+      // not be added to the composer reducer or change its default focus.
       if (
         this.state.mode === "NORMAL" &&
         this.state.pending === null &&
@@ -243,6 +255,18 @@ export class TuiSession {
       ) {
         this.settingsFocus = 0;
         this.screen = "settings";
+        this.clearStatus();
+        this.draw();
+        return;
+      }
+      if (
+        this.state.mode === "NORMAL" &&
+        this.state.pending === null &&
+        isHelpKey(action) &&
+        !action.ctrl &&
+        !action.alt
+      ) {
+        this.screen = "help";
         this.clearStatus();
         this.draw();
         return;
@@ -319,7 +343,7 @@ export class TuiSession {
       this.status = null;
       this.statusTimer = undefined;
       this.draw();
-    }, this.options.statusDurationMs ?? 1200);
+    }, this.options.statusDurationMs ?? 3000);
     this.statusTimer.unref?.();
   }
 
@@ -471,6 +495,14 @@ export class TuiSession {
   }
 
   private screenKey(key: string): void {
+    if (this.screen === "help") {
+      if (key === "Esc" || key === "?") {
+        this.screen = "composer";
+        this.clearStatus();
+      }
+      return;
+    }
+
     if (this.screen === "settings") {
       if (key === "Esc") {
         this.screen = "composer";
@@ -624,6 +656,12 @@ export class TuiSession {
   private handleEffects(effects: readonly AdapterEffect[]): void {
     for (const effect of effects) {
       if (effect.type === "yank") {
+        if (effect.value.length === 0) {
+          this.showStatus("Nothing to copy — preview is empty");
+          continue;
+        }
+        const label = PREVIEW_LABELS[effect.focus] ?? "preview";
+        const summary = clipWithEllipsis(effect.value, 20);
         let copied: NativeClipboardResult | null = null;
         try {
           copied = this.copyToClipboard(effect.value);
@@ -631,12 +669,10 @@ export class TuiSession {
           // Clipboard integrations are best-effort; preserve the OSC 52 path.
         }
         if (copied) {
-          this.showStatus(`Copied via ${copied.backend}`);
+          this.showStatus(`Copied ${label}: ${summary} via ${copied.backend}`);
         } else {
           this.options.terminal.write(effect.sequence);
-          this.showStatus(
-            "OSC 52 fallback sent (clipboard change unconfirmed)",
-          );
+          this.showStatus(`OSC 52 fallback sent: ${summary} (unconfirmed)`);
         }
       } else if (effect.type === "submit") {
         this.options.completion.finish(effect);

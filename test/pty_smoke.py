@@ -29,6 +29,11 @@ ALT_ENTER = b"\x1b[?1049h"
 ALT_EXIT = b"\x1b[?1049l"
 OSC52_NIHONGO = b"\x1b]52;c;5pel5pys6Kqe\x07"
 TIMEOUT = 10.0
+# OSC strings and CSI controls. OpenTUI positions each wide character with its
+# own escape run, so matching rendered text requires removing them first.
+ANSI_SEQUENCE = re.compile(
+    rb"\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]"
+)
 
 
 def set_size(fd: int, width: int, height: int) -> None:
@@ -132,12 +137,14 @@ def run_case(name: str, actions: list[tuple[float, str, object]]) -> tuple[bytes
 def after_final_exit(output: bytes) -> bytes:
     position = output.rfind(ALT_EXIT)
     assert position >= 0, "alternate screen was not restored"
-    suffix = output[position + len(ALT_EXIT) :]
     # Renderer shutdown still resets terminal modes after leaving the alternate
     # screen. Those controls are not ordinary output visible to the caller.
-    suffix = re.sub(rb"\x1b\][^\x07]*(?:\x07|\x1b\\)", b"", suffix)
-    suffix = re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", suffix)
-    return suffix
+    return ANSI_SEQUENCE.sub(b"", output[position + len(ALT_EXIT) :])
+
+
+def visible_text(output: bytes) -> bytes:
+    """Rendered text with escape sequences removed, for substring assertions."""
+    return ANSI_SEQUENCE.sub(b"", output)
 
 
 def assert_submitted(output: bytes, value: bytes) -> None:
@@ -257,7 +264,52 @@ def main() -> None:
     )
     assert yank_code == 0, f"yank case exited {yank_code}"
     assert OSC52_NIHONGO in yank, "capture omitted exact OSC 52 bytes"
-    assert b"OSC 52 fallback sent (clipboard change unconfirmed)" in yank
+    assert (
+        "OSC 52 fallback sent: 日本語 (unconfirmed)".encode()
+        in visible_text(yank)
+    ), "yank status did not echo the selected row value"
+
+    operator, operator_code = run_case(
+        "normal-dw-paste",
+        [
+            (0.8, "write", b"i"),
+            (1.0, "write", b"111 222"),
+            (1.3, "write", b"\x1b"),
+            (1.5, "write", b"0"),
+            (1.7, "write", b"d"),
+            (1.9, "write", b"w"),
+            (2.1, "write", b"P"),
+            (2.4, "write", b"\r"),
+        ],
+    )
+    assert operator_code == 0, f"dw/P exited {operator_code}"
+    assert_submitted(operator, b"111 222")
+
+    pending_out, pending_code = run_case(
+        "pending-operator",
+        [
+            (0.8, "write", b"d"),
+            (1.2, "write", b"\x1b"),
+            (1.5, "write", b"q"),
+        ],
+    )
+    assert pending_code == 0, f"pending operator exited {pending_code}"
+    assert b"-- d --" in visible_text(pending_out), (
+        "open d operator was not shown in the composer"
+    )
+
+    help_out, help_code = run_case(
+        "help",
+        [
+            (0.8, "write", b"?"),
+            (1.3, "write", b"\x1b"),
+            (1.6, "write", b"q"),
+        ],
+    )
+    assert help_code == 0, f"help case exited {help_code}"
+    help_text = visible_text(help_out)
+    assert b"Help" in help_text, "? did not open the help overlay"
+    assert b"Esc close" in help_text, "help overlay omitted its close hint"
 
     resized, resize_code = run_case(
         "resize",
@@ -273,7 +325,8 @@ def main() -> None:
     assert b"Japanese composer" in resized[small_at:], "normal view did not return after resize"
 
     print(
-        "PTY smoke passed: Enter, normal e/b, Ctrl-W/U, q, Ctrl-C, OSC52, and resize"
+        "PTY smoke passed: Enter, normal e/b, d-motions/paste, pending operator, "
+        "help overlay, Ctrl-W/U, q, Ctrl-C, OSC52, and resize"
     )
 
 

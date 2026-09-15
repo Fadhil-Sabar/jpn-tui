@@ -258,6 +258,74 @@ describe("grapheme-safe NORMAL mode", () => {
   });
 });
 
+describe("vim-style delete operators and the unnamed register", () => {
+  test("d-operator motions delete the expected ranges and fill the register", () => {
+    const run = (keys: readonly string[]): ComposerState => {
+      let state = createInitialState({ buffer: "one two" });
+      for (const key of keys) state = step(state, key);
+      return state;
+    };
+
+    expect(run(["d", "w"])).toMatchObject({ buffer: "two", yank: "one " });
+    expect(run(["d", "e"])).toMatchObject({ buffer: " two", yank: "one" });
+    expect(run(["d", "d"])).toMatchObject({ buffer: "", yank: "one two" });
+    expect(run(["d", "$"])).toMatchObject({ buffer: "", yank: "one two" });
+    expect(run(["$", "d", "0"])).toMatchObject({ buffer: "o", yank: "one tw" });
+    expect(run(["$", "d", "h"])).toMatchObject({ buffer: "one to", yank: "w" });
+    expect(run(["$", "d", "l"])).toMatchObject({ buffer: "one tw", yank: "o" });
+  });
+
+  test("a bounded d motion that deletes nothing is consumed without editing", () => {
+    let state = createInitialState({ buffer: "abc" });
+    state = step(state, "d");
+    state = step(state, "0");
+    expect(state.buffer).toBe("abc");
+    expect(state.pending).toBeNull();
+    expect(state.undo).toEqual([]);
+  });
+
+  test("x and D fill the register like their delete operator equivalents", () => {
+    const x = step(createInitialState({ buffer: "abc" }), "x");
+    expect(x).toMatchObject({ buffer: "bc", yank: "a" });
+
+    const capitalD = step(
+      step(createInitialState({ buffer: "abc" }), "l"),
+      "D",
+    );
+    expect(capitalD).toMatchObject({ buffer: "a", yank: "bc" });
+  });
+
+  test("p pastes after the cursor and P pastes before it", () => {
+    let state = step(createInitialState({ buffer: "abc" }), "x");
+    state = step(state, "p");
+    expect(state.buffer).toBe("bac");
+    expect(state.cursor).toBe(1);
+
+    state = step(createInitialState({ buffer: "abc" }), "x");
+    state = step(state, "P");
+    expect(state.buffer).toBe("abc");
+    expect(state.cursor).toBe(0);
+  });
+
+  test("p pastes a whole-line dd yank back into an empty buffer", () => {
+    let state = createInitialState({ buffer: "abc" });
+    state = step(state, "d");
+    state = step(state, "d");
+    expect(state.buffer).toBe("");
+    state = step(state, "p");
+    expect(state.buffer).toBe("abc");
+    expect(state.cursor).toBe(2);
+  });
+
+  test("p and P are no-ops when the register is empty", () => {
+    for (const key of ["p", "P"]) {
+      const state = step(createInitialState({ buffer: "abc" }), key);
+      expect(state.buffer).toBe("abc");
+      expect(state.undo).toEqual([]);
+    }
+  });
+});
+
 describe("bounded undo and redo", () => {
   test("undo/redo restore deterministic snapshots and edits clear redo", () => {
     let state = createInitialState({ buffer: "abc", historyLimit: 2 });

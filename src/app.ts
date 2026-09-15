@@ -25,7 +25,12 @@ export interface AdapterAction {
 
 export type AdapterEffect =
   | { readonly type: "submit"; readonly value: string }
-  | { readonly type: "yank"; readonly value: string; readonly sequence: string }
+  | {
+      readonly type: "yank";
+      readonly value: string;
+      readonly sequence: string;
+      readonly focus: number;
+    }
   | { readonly type: "quit" }
   | { readonly type: "interrupt" };
 
@@ -102,7 +107,12 @@ function adaptEffect(
     case "submit":
       return { type: "submit", value };
     case "yank":
-      return { type: "yank", value, sequence: osc52Sequence(value) };
+      return {
+        type: "yank",
+        value,
+        sequence: osc52Sequence(value),
+        focus: effect.focus,
+      };
     case "quit":
       return { type: "quit" };
     case "interrupt":
